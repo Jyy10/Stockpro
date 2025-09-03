@@ -1,8 +1,9 @@
-# requirements_worker.txt
+# requirements.txt (最终修正版 - for Streamlit App)
+streamlit
 pandas
+psycopg2-binary
 requests
 akshare
 PyPDF2
-psycopg2-binary
 thefuzz
 python-Levenshtein
