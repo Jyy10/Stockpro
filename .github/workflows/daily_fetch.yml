@@ -11,15 +11,12 @@ on:
         type: choice
         default: 'daily_update'
         options:
-          - daily_update  # 运行每日更新
-          - backfill      # 运行历史回补
+          - daily_update
+          - backfill
   schedule:
-    # 每天在 UTC 11:00 (台北/北京时间 19:00) 运行
     - cron: '0 11 * * *'
 
-# --- 顶级的 'jobs' 关键字，所有任务都必须在它下面 ---
 jobs:
-  # --- 'run-script' 是任务的ID，它必须在 'jobs' 下方并缩进2个空格 ---
   run-script:
     runs-on: ubuntu-latest
     steps:
@@ -31,20 +28,17 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install psycopg2-binary
+      - name: Install dependencies for Worker
+        # --- 【关键修正】确保Worker使用的是它自己的、完整的依赖文件 ---
+        run: pip install -r requirements_worker.txt
 
       - name: Run Daily Update Script
-        # 如果是定时任务，或手动选择'daily_update'，则运行 worker.py
         if: github.event_name == 'schedule' || github.event.inputs.task_to_run == 'daily_update'
         env:
           DATABASE_URI: ${{ secrets.DATABASE_URI }}
         run: python worker.py
 
       - name: Run Backfill Script
-        # 仅在手动选择'backfill'时运行
         if: github.event.inputs.task_to_run == 'backfill'
         env:
           DATABASE_URI: ${{ secrets.DATABASE_URI }}
