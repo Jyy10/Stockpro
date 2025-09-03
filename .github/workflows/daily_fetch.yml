@@ -23,7 +23,7 @@ jobs:
     # --- 【关键修改】在这里为所有 'run' 命令设置默认工作目录 ---
     defaults:
       run:
-        working-directory: ./stockpro/app
+        working-directory: ./Stockpro/app
 
     steps:
       - name: Checkout repository
