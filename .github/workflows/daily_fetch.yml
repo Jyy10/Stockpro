@@ -6,17 +6,16 @@ on:
   schedule:
     - cron: '0 16 * * *' # 每天 UTC 16:00 (北京时间午夜) 运行
 
-jobs:
-  fetch-and-store:
+run-script:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run Worker Script
+
+      - name: Install dependencies for Worker # <--- 关键修改
+        run: pip install -r requirements_worker.txt # <--- 关键修改
         env:
           DATABASE_URI: ${{ secrets.DATABASE_URI }}
         run: python worker.py
