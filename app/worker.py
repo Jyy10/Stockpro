@@ -7,11 +7,44 @@ from datetime import date
 import data_handler as dh
 
 def connect_db():
-    # ... (此函数不变)
+    """连接到数据库，并打印详细的错误信息"""
     try:
-        conn_string = os.environ.get('DATABASE_URI'); conn = psycopg2.connect(conn_string); return conn
+        # 从环境变量中读取密钥
+        db_host = os.environ.get("DB_HOST")
+        db_port = os.environ.get("DB_PORT")
+        db_name = os.environ.get("DB_NAME")
+        db_user = os.environ.get("DB_USER")
+        db_password = os.environ.get("DB_PASSWORD")
+
+        # 调试信息：检查环境变量是否被正确读取
+        print("--- 正在尝试连接数据库，使用以下参数 ---")
+        print(f"Host: {'已设置' if db_host else '未设置'}")
+        print(f"Port: {db_port}")
+        print(f"DB Name: {db_name}")
+        print(f"User: {db_user}")
+        print("Password: 已设置" if db_password else "未设置")
+        print("-----------------------------------------")
+
+        # 检查是否有任何一个关键参数为空
+        if not all([db_host, db_port, db_name, db_user, db_password]):
+            print("错误：一个或多个数据库连接环境变量未设置！")
+            return None
+
+        # 尝试连接
+        conn = psycopg2.connect(
+            host=db_host,
+            port=db_port,
+            dbname=db_name,
+            user=db_user,
+            password=db_password,
+            sslmode='require'
+        )
+        print("数据库连接成功！")
+        return conn
     except Exception as e:
-        print(f"数据库连接失败: {e}"); return None
+        # 【关键】打印出最详细的底层错误信息
+        print(f"数据库连接失败，详细错误: {e}")
+        return None
 
 def main():
     print("每日更新 Worker 开始运行...")
