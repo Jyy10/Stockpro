@@ -1,4 +1,4 @@
-# app.py (v3.3 - 采用组件式数据库连接)
+# app.py (v3.4 - 最终连接修正版)
 
 import streamlit as st
 import pandas as pd
@@ -11,16 +11,16 @@ st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", lay
 
 @st.cache_resource(ttl=600)
 def init_connection():
-    """使用组件式密钥初始化数据库连接，以提高稳定性"""
+    """使用组件式密钥并强制SSL模式进行连接"""
     try:
-        # 从 st.secrets 读取 [database] 表下的所有项
         db_secrets = st.secrets.database
         conn = psycopg2.connect(
             host=db_secrets.host,
             port=db_secrets.port,
             dbname=db_secrets.dbname,
             user=db_secrets.user,
-            password=db_secrets.password
+            password=db_secrets.password,
+            sslmode='require'  # <-- 关键！强制要求SSL安全连接
         )
         return conn
     except Exception as e:
@@ -76,7 +76,7 @@ if submit_button:
         st.error("请选择有效的日期范围。")
 
 if 'announcement_list' not in st.session_state:
-    if conn: # 只有在连接成功时才执行默认查询
+    if conn:
         st.info("首次加载，正在为您查询过去90天的数据...")
         run_query(default_start_date, today, "")
         st.rerun()
