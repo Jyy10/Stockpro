@@ -22,8 +22,8 @@ jobs:
 
     defaults:
       run:
-        # --- 【关键修正】将 'stockpro' 修改为 'Stockpro' (S大写)，与您的文件夹名完全匹配 ---
-        working-directory: ./Stockpro/app
+        # --- 【最终修正】根据日志结果，正确的路径是 './app' ---
+        working-directory: ./app
 
     steps:
       - name: Checkout repository
