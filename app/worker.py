@@ -73,7 +73,7 @@ def main():
             def info(self, text): print(text)
         df = dh.scrape_akshare(keywords, today, today, DummyPlaceholder())
 
-    if df.empty:
+    if df is None or df.empty:
         print("今天没有找到相关公告。"); conn.close(); return
 
     print(f"找到 {len(df)} 条公告，开始处理...")
