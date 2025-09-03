@@ -1,4 +1,4 @@
-# app.py (v1.1 - 增加了流式更新功能)
+# app.py (v2.0 - 两阶段交互式架构)
 
 import streamlit as st
 import pandas as pd
@@ -17,37 +17,7 @@ st.set_page_config(
 st.title('📈 A股并购事件追踪器 (专业版)')
 st.markdown("数据来源: 巨潮资讯网 | 财务数据: AkShare")
 
-# --- 新增：一个专门用于渲染结果的函数 ---
-def display_results(df):
-    """传入一个DataFrame，将其内容以st.expander的形式展示出来"""
-    st.info(f"已实时加载 {len(df)} 条结果。点击每条结果前的 `>` 符号可展开查看详细信息。")
-    st.warning("AI自动提取的“拟并购公司”和“交易对价”等信息可能不准确，请务必点击公告链接进行核实。")
-
-    for index, row in df.iterrows():
-        summary_title = f"**{row['公司名称']} ({row['股票代码']})** | {row['公告日期']}"
-        with st.expander(summary_title):
-            st.markdown(f"**公告标题**: {row['公告标题']}")
-            st.markdown(f"**公告链接**: [点击查看原文]({row['PDF链接']})")
-            st.markdown("---")
-            
-            st.subheader("交易核心概要 (AI提取)")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("拟并购公司名称", row.get('拟并购公司名称', 'N/A'))
-            col2.metric("交易对价", row.get('交易对价', 'N/A'))
-            col3.text_area("涉及交易股东", row.get('涉及交易股东', 'N/A'), height=100, disabled=True)
-            
-            st.markdown("---")
-
-            st.subheader("上市公司快照")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("总市值 (亿元)", f"{row.get('总市值', 0) / 1e8:.2f}" if pd.notna(row.get('总市值')) else "N/A")
-            col_b.metric("市盈率 (动态)", f"{row.get('市盈率-动态'):.2f}" if pd.notna(row.get('市盈率-动态')) else "N/A")
-            col_c.metric("资产负债率 (%)", f"{row.get('资产负债率(%)'):.2f}" if pd.notna(row.get('资产负债率(%)')) else "N/A")
-            
-            st.text_area("行业题材", row.get('行业题材', 'N/A'), height=100, disabled=True)
-
-
-# --- 2. 应用界面布局 ---
+# --- 2. 应用界面布局 (侧边栏) ---
 with st.sidebar:
     st.header("🔍 筛选条件")
     today = date.today()
@@ -66,22 +36,25 @@ with st.sidebar:
     )
     keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()]
 
-# --- 3. 主程序逻辑 ---
+# --- 3. 初始化Session State ---
+if 'announcement_list' not in st.session_state:
+    st.session_state.announcement_list = pd.DataFrame()
+if 'detailed_results' not in st.session_state:
+    st.session_state.detailed_results = {} # 使用字典存储单条的详细结果
 
-# 关键改动(1): 在主页面创建一个空的占位符
-results_placeholder = st.empty()
+# --- 4. 主程序逻辑 ---
 
-if st.sidebar.button('🚀 开始抓取和分析'):
-    # 清空之前的session和占位符
-    st.session_state.pop('final_data', None)
-    results_placeholder.empty()
-
+# 阶段一：点击按钮，只获取公告列表
+if st.sidebar.button('🚀 获取公告列表'):
+    # 重置状态
+    st.session_state.announcement_list = pd.DataFrame()
+    st.session_state.detailed_results = {}
+    
     if not keywords or len(date_range) != 2:
         st.error("请输入关键词并选择有效的日期范围。")
     else:
         start_date, end_date = date_range
         
-        # 故障切换逻辑保持不变
         results_df = pd.DataFrame()
         try:
             with st.spinner('正在从主数据源(巨潮资讯网)抓取公告列表...'):
@@ -89,48 +62,79 @@ if st.sidebar.button('🚀 开始抓取和分析'):
             if results_df.empty:
                 raise ValueError("主数据源未返回任何数据")
         except Exception:
-            with results_placeholder.container():
+            with st.spinner('主数据源异常，正在尝试从备用数据源抓取...'):
                 st.warning("⚠️ 检测到主数据源(巨潮)访问失败或无结果，已自动切换到备用数据源(东方财富)。")
-                st.info("正在尝试从备用数据源抓取...")
-            try:
-                results_df = dh.scrape_akshare(keywords, start_date, end_date)
-            except Exception as e_ak:
-                st.error(f"备用数据源(AkShare)也抓取失败: {e_ak}")
+                try:
+                    results_df = dh.scrape_akshare(keywords, start_date, end_date)
+                except Exception as e_ak:
+                    st.error(f"备用数据源(AkShare)也抓取失败: {e_ak}")
 
-        if results_df.empty:
-            results_placeholder.warning("在指定条件下，主、备数据源均未找到任何相关公告。")
+        if not results_df.empty:
+            st.session_state.announcement_list = results_df
+            st.success(f"成功获取 {len(results_df)} 条公告概览！")
         else:
-            with results_placeholder.container():
-                st.success(f"找到 {len(results_df)} 条相关公告，开始逐条深度解析...")
-            
-            # 批量获取财务数据 (这一步仍然需要先完成)
-            with st.spinner('正在批量获取上市公司财务数据...'):
-                all_stock_codes = results_df['股票代码'].unique().tolist()
-                financial_data_df = dh.get_stock_financial_data(all_stock_codes)
-            
-            if not financial_data_df.empty:
-                results_df = pd.merge(results_df, financial_data_df, on='股票代码', how='left')
+            st.warning("在指定条件下，主、备数据源均未找到任何相关公告。")
 
-            # 关键改动(2): 逐条处理并实时更新占位符
-            processed_rows = []
-            for index, row in results_df.iterrows():
-                details = dh.extract_details_from_pdf(row['PDF链接'])
-                row['拟并购公司名称'], row['交易对价'], row['涉及交易股东'] = details
-                processed_rows.append(row)
+# 阶段二：展示列表，并按需加载详情
+if not st.session_state.announcement_list.empty:
+    st.markdown("---")
+    st.subheader("📊 公告概览列表")
+    st.info("点击右侧的“加载并分析详情”按钮，可按需解析单条公告的详细信息。")
+    
+    df = st.session_state.announcement_list
+    
+    for index, row in df.iterrows():
+        # 使用列布局来展示基础信息和按钮
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            st.markdown(f"**{row['公司名称']} ({row['股票代码']})**")
+            st.caption(f"标题: {row['公告标题']} | 日期: {row['公告日期']}")
+        
+        with col2:
+            # 为每一行的按钮设置一个唯一的key
+            if st.button("加载并分析详情", key=f"detail_{index}"):
+                with st.spinner(f"正在分析 {row['公司名称']} 的公告..."):
+                    # 1. 获取单条的财务数据
+                    financial_data = dh.get_stock_financial_data([row['股票代码']])
+                    # 2. 解析单条的PDF
+                    pdf_details = dh.extract_details_from_pdf(row['PDF链接'])
+                    
+                    # 准备要存储的详细信息
+                    details = {
+                        'financials': financial_data.iloc[0] if not financial_data.empty else pd.Series(),
+                        'pdf_extract': {
+                            '拟并购公司名称': pdf_details[0],
+                            '交易对价': pdf_details[1],
+                            '涉及交易股东': pdf_details[2]
+                        }
+                    }
+                    st.session_state.detailed_results[index] = details
+        
+        # 如果这条公告的详细信息已经被加载过，就展示它
+        if index in st.session_state.detailed_results:
+            detail_data = st.session_state.detailed_results[index]
+            financials = detail_data.get('financials', pd.Series())
+            pdf_extract = detail_data.get('pdf_extract', {})
 
-                # 每处理完一条，就用最新的完整结果列表去更新占位符的内容
-                with results_placeholder.container():
-                    st.success(f"找到 {len(results_df)} 条公告，已实时解析 {len(processed_rows)}/{len(results_df)} 条...")
-                    current_results_df = pd.DataFrame(processed_rows)
-                    display_results(current_results_df) # 调用我们新增的渲染函数
-            
-            # 循环结束后，将最终结果存入session_state
-            final_df = pd.DataFrame(processed_rows)
-            st.session_state['final_data'] = final_df
+            with st.expander("✅ 查看已加载的详细分析", expanded=True):
+                st.markdown(f"**公告链接**: [点击查看原文]({row['PDF链接']})")
+                st.markdown("---")
 
-# --- 4. 如果session中有数据，直接展示最终结果 ---
-elif 'final_data' in st.session_state:
-    final_df = st.session_state['final_data']
-    with results_placeholder.container():
-        st.success("数据加载完成！")
-        display_results(final_df)
+                st.subheader("交易核心概要 (AI提取)")
+                col_pdf1, col_pdf2, col_pdf3 = st.columns(3)
+                col_pdf1.metric("拟并购公司名称", pdf_extract.get('拟并购公司名称', 'N/A'))
+                col_pdf2.metric("交易对价", pdf_extract.get('交易对价', 'N/A'))
+                col_pdf3.text_area("涉及交易股东", pdf_extract.get('涉及交易股东', 'N/A'), height=100, disabled=True)
+                
+                st.markdown("---")
+
+                st.subheader("上市公司快照")
+                col_fin1, col_fin2, col_fin3 = st.columns(3)
+                col_fin1.metric("总市值 (亿元)", f"{financials.get('总市值', 0) / 1e8:.2f}" if pd.notna(financials.get('总市值')) else "N/A")
+                col_fin2.metric("市盈率 (动态)", f"{financials.get('市盈率-动态'):.2f}" if pd.notna(financials.get('市盈率-动态')) else "N/A")
+                col_fin3.metric("资产负债率 (%)", f"{financials.get('资产负债率(%)'):.2f}" if pd.notna(financials.get('资产负债率(%)')) else "N/A")
+                
+                st.text_area("行业题材", financials.get('行业题材', 'N/A'), height=100, disabled=True)
+        
+        st.markdown("---") # 每条记录之间的分割线
