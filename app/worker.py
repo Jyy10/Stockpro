@@ -19,79 +19,95 @@ def connect_db():
         print(f"数据库连接失败，详细底层错误: {e}"); return None
 
 def get_company_profiles(stock_codes):
-    profiles = {}; print(f"准备为 {len(stock_codes)} 家公司获取基本信息...")
-    for code in stock_codes:
+    """使用最稳定的巨潮资讯接口获取公司信息。"""
+    # ... (此函数保持不变)
+    profiles = {}
+    valid_codes = [code for code in stock_codes if code and code != 'N/A']
+    if not valid_codes: return profiles
+    print(f"准备为 {len(valid_codes)} 家公司获取基本信息...")
+    for code in valid_codes:
         try:
-            profile_df = ak.stock_individual_info_em(symbol=code)
+            profile_df = ak.stock_profile_cninfo(symbol=code)
             industry = profile_df[profile_df['item'] == '行业']['value'].iloc[0]
-            main_business = profile_df[profile_df['item'] == '主营业务']['value'].iloc[0]
+            main_business = profile_df[profile_df['item'] == '主营业务范围']['value'].iloc[0]
             profiles[code] = {'industry': industry, 'main_business': main_business}
-            print(f"  - 成功获取 {code} 的信息")
+            print(f"  - 成功获取 {code} ({industry}) 的信息")
         except Exception as e:
-            print(f"  ! 获取 {code} 信息失败: {e}"); profiles[code] = {'industry': 'N/A', 'main_business': 'N/A'}
-        time.sleep(0.3)
+            print(f"  ! 获取 {code} 信息失败: {e}"); profiles[code] = {'industry': '查询失败', 'main_business': '查询失败'}
+        time.sleep(0.5)
     return profiles
 
 def main():
-    print("每日更新 Worker 开始运行...")
+    print("每日更新 Worker 开始运行 (三步原则模式)...")
     conn = connect_db()
     if not conn: return
 
-    # ... (抓取公告的逻辑不变) ...
+    # --- 步骤一：查找当日公告 ---
+    print("\n--- 步骤1: 查找当日公告 ---")
     today = date.today()
-    keywords = ["重大资产重组预案", "重大资产重组草案", "发行股份购买资产预案", "发行股份购买资产草案"]
+    keywords = ["重大资产重组预案", "重大资产重组草案", "发行股份购买资产预案", "发行股份购买资产草案", "吸收合并", "要约收购报告书", "收购报告书"]
     print(f"正在抓取日期: {today}")
-    df = pd.DataFrame()
+    
+    announcements_df = pd.DataFrame()
     try:
-        df = dh.scrape_cninfo(keywords, today, today)
-    except Exception as e:
-        print(f"主数据源抓取失败，尝试备用源: {e}")
         class DummyPlaceholder:
             def info(self, text): print(text)
-        df = dh.scrape_akshare(keywords, today, today, DummyPlaceholder())
-    
-    # --- 【关键修改】在这里，我们只检查PDF链接的有效性 ---
-    if df is None or df.empty:
+        announcements_df = dh.scrape_akshare(keywords, today, today, DummyPlaceholder())
+    except Exception as e:
+        print(f"数据源抓取失败: {e}")
+
+    if announcements_df is None or announcements_df.empty:
         print("今天没有找到相关公告。"); conn.close(); return
+    print(f"步骤1完成：找到 {len(announcements_df)} 条相关公告。")
 
-    print(f"找到 {len(df)} 条公告，开始处理...")
-    unique_codes = df['股票代码'].unique().tolist()
+    # --- 步骤二：严格查找公司信息 ---
+    print("\n--- 步骤2: 批量查找公司信息 ---")
+    unique_codes = announcements_df['股票代码'].unique().tolist()
     company_profiles = get_company_profiles(unique_codes)
-    cursor = conn.cursor()
-    
-    for index, row in df.iterrows():
-        try:
-            pdf_link = row.get('PDF链接')
-            # 只要求PDF链接有效即可，其他信息可以为空
-            if not pdf_link or not str(pdf_link).startswith('http'):
-                print(f"  - 链接无效，跳过: {row.get('公告标题', 'N/A')[:20]}...")
-                continue
+    print(f"步骤2完成：获取了 {len(company_profiles)} 家公司的档案。")
 
-            # 如果公告已存在，则跳过
-            cursor.execute("SELECT id FROM announcements WHERE pdf_link = %s", (pdf_link,))
-            if cursor.fetchone():
-                print(f"  - 公告已存在，跳过: {row.get('公告标题', 'N/A')[:20]}...")
-                continue
-            
-            # 获取其他信息，如果缺失则使用'N/A'作为默认值
+    # --- 步骤三：逐条解读公告详情并存入数据库 ---
+    print("\n--- 步骤3: 逐条解析公告并存入数据库 ---")
+    cursor = conn.cursor()
+    successful_inserts = 0
+    
+    for index, row in announcements_df.iterrows():
+        announcement_title = row.get('公告标题', '无标题')
+        print(f"\n  处理公告: {announcement_title[:40]}...")
+        try:
+            # 数据校验
             stock_code = row.get('股票代码', 'N/A')
             company_name = row.get('公司名称', 'N/A')
-            announcement_title = row.get('公告标题', '无标题') # 标题也给一个默认值
-            announcement_date = row.get('公告日期')
+            pdf_link = row.get('PDF链接', '')
+            if stock_code == 'N/A' or company_name == 'N/A' or not pdf_link.startswith('http'):
+                print(f"    - 核心信息不完整，跳过。")
+                continue
 
-            pdf_details = dh.extract_details_from_pdf(pdf_link)
-            profile = company_profiles.get(stock_code, {'industry': 'N/A', 'main_business': 'N/A'})
+            # 数据库去重
+            cursor.execute("SELECT id FROM announcements WHERE pdf_link = %s", (pdf_link,))
+            if cursor.fetchone():
+                print(f"    - 公告已存在于数据库，跳过。")
+                continue
             
+            # 解读公告详情 (最耗时的一步)
+            print(f"    - 正在解读PDF...")
+            pdf_details = dh.extract_details_from_pdf(pdf_link)
+            print(f"    - PDF解读完成。")
+            
+            # 整合所有信息
+            profile = company_profiles.get(stock_code, {'industry': '查询失败', 'main_business': '查询失败'})
+            
+            # 准备入库
             insert_query = """INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link, target_company, transaction_price, shareholders, industry, main_business) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);"""
-            record = (announcement_date, stock_code, company_name, announcement_title, pdf_link, pdf_details[0], pdf_details[1], pdf_details[2], profile['industry'], profile['main_business'])
+            record = (row['公告日期'], stock_code, company_name, announcement_title, pdf_link, pdf_details[0], pdf_details[1], pdf_details[2], profile['industry'], profile['main_business'])
             
             cursor.execute(insert_query, record)
-            print(f"  + 成功插入: {announcement_title[:20]}...")
+            print(f"    => 成功存入数据库！")
+            successful_inserts += 1
+
         except Exception as e:
-            print(f"  ! 处理单条记录时出错: {row.get('公告标题', 'N/A')[:20]}..., 错误: {e}"); conn.rollback(); continue
+            print(f"    ! 处理该条记录时发生意外错误: {e}"); conn.rollback(); continue
     
     conn.commit(); cursor.close(); conn.close()
+    print(f"\n步骤3完成：成功处理并新插入 {successful_inserts} 条记录。")
     print("每日更新 Worker 运行完毕。")
-
-if __name__ == "__main__":
-    main()
