@@ -1,4 +1,4 @@
-# app.py (v3.2 - 修正数据库连接逻辑并增加默认加载)
+# app.py (v3.3 - 采用组件式数据库连接)
 
 import streamlit as st
 import pandas as pd
@@ -11,22 +11,20 @@ st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", lay
 
 @st.cache_resource(ttl=600)
 def init_connection():
-    """初始化数据库连接，并处理潜在的连接错误"""
+    """使用组件式密钥初始化数据库连接，以提高稳定性"""
     try:
-        # st.secrets是一个字典结构，需要用.get()或[]访问
-        conn_string = st.secrets.get("DATABASE_URI")
-        if not conn_string:
-            # 兼容本地开发时使用环境变量
-            conn_string = os.environ.get("DATABASE_URI")
-        
-        if not conn_string:
-            st.error("数据库连接字符串未找到！请在Streamlit Secrets中配置 'DATABASE_URI'。")
-            return None
-            
-        return psycopg2.connect(conn_string)
+        # 从 st.secrets 读取 [database] 表下的所有项
+        db_secrets = st.secrets.database
+        conn = psycopg2.connect(
+            host=db_secrets.host,
+            port=db_secrets.port,
+            dbname=db_secrets.dbname,
+            user=db_secrets.user,
+            password=db_secrets.password
+        )
+        return conn
     except Exception as e:
-        # 将详细错误打印到Streamlit界面，方便调试
-        st.error(f"数据库连接失败，请检查Streamlit Secrets配置: {e}")
+        st.error(f"数据库连接失败，请检查Streamlit Secrets中的组件式密钥配置: {e}")
         return None
 
 conn = init_connection()
@@ -43,15 +41,13 @@ with st.sidebar:
     date_range = st.date_input("选择公告日期范围", value=(default_start_date, today), format="YYYY-MM-DD")
     keyword_input = st.text_input("输入标题关键词进行筛选 (支持模糊搜索)")
     
-    # 将按钮移出函数，使其能被其他部分调用
     submit_button = st.button('🔍 查询数据库')
 
-# --- 新增：一个专门执行查询的函数 ---
 def run_query(start, end, keyword):
     """根据传入的参数执行数据库查询，并更新session_state"""
     if not conn:
         st.error("数据库未连接，无法查询。")
-        st.session_state.announcement_list = pd.DataFrame() # 清空结果
+        st.session_state.announcement_list = pd.DataFrame()
         return
 
     try:
@@ -69,30 +65,27 @@ def run_query(start, end, keyword):
             
     except Exception as e:
         st.error(f"查询数据库时出错: {e}")
-        st.session_state.announcement_list = pd.DataFrame() # 清空结果
+        st.session_state.announcement_list = pd.DataFrame()
 
 # --- 3. 主程序逻辑 ---
 
-# 如果按下了按钮，则执行查询
 if submit_button:
     if len(date_range) == 2:
         run_query(date_range[0], date_range[1], keyword_input)
     else:
         st.error("请选择有效的日期范围。")
 
-# 如果是首次加载（session_state中没有列表），则自动执行一次默认查询
 if 'announcement_list' not in st.session_state:
-    st.info("首次加载，正在为您查询过去90天的数据...")
-    run_query(default_start_date, today, "")
-    # 强制重新运行以展示结果
-    st.rerun()
+    if conn: # 只有在连接成功时才执行默认查询
+        st.info("首次加载，正在为您查询过去90天的数据...")
+        run_query(default_start_date, today, "")
+        st.rerun()
 
 # --- 4. 结果展示 ---
 if 'announcement_list' in st.session_state and not st.session_state.announcement_list.empty:
     df = st.session_state.announcement_list
     st.success(f"从数据库中快速查到 {len(df)} 条结果！")
     
-    # ... (展示逻辑和之前版本完全一样)
     for index, row in df.iterrows():
         with st.expander(f"**{row['company_name']} ({row['stock_code']})** | {row['announcement_date'].strftime('%Y-%m-%d')}", expanded=False):
             st.markdown(f"**公告标题**: {row['announcement_title']}")
