@@ -1,0 +1,25 @@
+# Dockerfile
+
+# 1. 使用官方的Python 3.9 slim版本作為基礎
+FROM python:3.9-slim
+
+# 2. 在容器中建立一個工作目錄
+WORKDIR /app
+
+# 3. 將需求文件複製到工作目錄中
+COPY requirements.txt ./
+
+# 4. 安裝所有必要的Python庫
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 5. 將您資料夾中所有其他檔案 (主要是 app.py) 複製到工作目錄
+COPY . .
+
+# 6. 向外界暴露Streamlit預設使用的8501端口
+EXPOSE 8501
+
+# 7. 容器啟動時運行的指令
+#    --server.port=8501: 指定端口
+#    --server.enableCORS=false: 在Cloud Run環境中通常需要關閉CORS
+#    --server.address=0.0.0.0: 讓服務可以從容器外部被訪問
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.enableCORS=false", "--server.address=0.0.0.0"]
