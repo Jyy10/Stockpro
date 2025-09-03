@@ -1,6 +1,7 @@
-# requirements.txt (最终修正版)
+# requirements.txt
 streamlit
-requests
 pandas
+requests
 akshare
 PyPDF2
+psycopg2-binary
