@@ -1,6 +1,8 @@
-# requirements_worker.txt (完整版)
+# requirements_worker.txt
 pandas
 requests
 akshare
 PyPDF2
 psycopg2-binary
+thefuzz
+python-Levenshtein
