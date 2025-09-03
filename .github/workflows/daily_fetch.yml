@@ -1,4 +1,4 @@
-# .github/workflows/daily_fetch.yml (最终路径修正版)
+# .github/workflows/daily_fetch.yml (真正最终路径修正版)
 
 name: Announcement Fetcher
 
@@ -22,7 +22,7 @@ jobs:
 
     defaults:
       run:
-        # --- 【最终修正】根据日志结果，正确的路径是 './app' ---
+        # --- 【最终修正】根据我们之前的日志诊断，正确的路径是 './app' ---
         working-directory: ./app
 
     steps:
@@ -40,11 +40,19 @@ jobs:
       - name: Run Daily Update Script
         if: github.event_name == 'schedule' || github.event.inputs.task_to_run == 'daily_update'
         env:
-          DATABASE_URI: postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}?sslmode=require
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: python worker.py
 
       - name: Run Backfill Script
         if: github.event.inputs.task_to_run == 'backfill'
         env:
-          DATABASE_URI: postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}?sslmode=require
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: python backfill_worker.py
