@@ -5,7 +5,6 @@ import pandas as pd
 from datetime import date, timedelta
 import psycopg2
 import os
-import data_handler as dh # 重新导入data_handler
 
 # --- (页面配置, 数据库连接, 界面, 查询逻辑等部分都保持不变, 此处省略) ---
 st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", layout="wide")
