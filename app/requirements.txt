@@ -1,5 +1,6 @@
-# requirements.txt
+# requirements.txt (最终修正版)
 streamlit
 requests
 pandas
 akshare
+PyPDF2
