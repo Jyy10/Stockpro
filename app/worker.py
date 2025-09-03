@@ -37,10 +37,10 @@ def main():
     conn = connect_db()
     if not conn: return
 
+    # ... (抓取公告的逻辑不变) ...
     today = date.today()
     keywords = ["重大资产重组预案", "重大资产重组草案", "发行股份购买资产预案", "发行股份购买资产草案"]
     print(f"正在抓取日期: {today}")
-    
     df = pd.DataFrame()
     try:
         df = dh.scrape_cninfo(keywords, today, today)
@@ -49,8 +49,8 @@ def main():
         class DummyPlaceholder:
             def info(self, text): print(text)
         df = dh.scrape_akshare(keywords, today, today, DummyPlaceholder())
-
-    # --- 【这就是修正后的代码】 ---
+    
+    # --- 【关键修改】在这里，我们只检查PDF链接的有效性 ---
     if df is None or df.empty:
         print("今天没有找到相关公告。"); conn.close(); return
 
@@ -61,20 +61,32 @@ def main():
     
     for index, row in df.iterrows():
         try:
-            stock_code = row.get('股票代码'); company_name = row.get('公司名称'); pdf_link = row.get('PDF链接')
-            if not all([stock_code, company_name, pdf_link]) or not str(pdf_link).startswith('http'):
-                print(f"  - 数据不完整或链接无效，跳过: {row.get('公告标题', 'N/A')[:20]}...")
+            pdf_link = row.get('PDF链接')
+            # 只要求PDF链接有效即可，其他信息可以为空
+            if not pdf_link or not str(pdf_link).startswith('http'):
+                print(f"  - 链接无效，跳过: {row.get('公告标题', 'N/A')[:20]}...")
                 continue
+
+            # 如果公告已存在，则跳过
             cursor.execute("SELECT id FROM announcements WHERE pdf_link = %s", (pdf_link,))
             if cursor.fetchone():
-                print(f"  - 公告已存在，跳过: {row['公告标题'][:20]}...")
+                print(f"  - 公告已存在，跳过: {row.get('公告标题', 'N/A')[:20]}...")
                 continue
+            
+            # 获取其他信息，如果缺失则使用'N/A'作为默认值
+            stock_code = row.get('股票代码', 'N/A')
+            company_name = row.get('公司名称', 'N/A')
+            announcement_title = row.get('公告标题', '无标题') # 标题也给一个默认值
+            announcement_date = row.get('公告日期')
+
             pdf_details = dh.extract_details_from_pdf(pdf_link)
             profile = company_profiles.get(stock_code, {'industry': 'N/A', 'main_business': 'N/A'})
+            
             insert_query = """INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link, target_company, transaction_price, shareholders, industry, main_business) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);"""
-            record = (row['公告日期'], stock_code, company_name, row['公告标题'], pdf_link, pdf_details[0], pdf_details[1], pdf_details[2], profile['industry'], profile['main_business'])
+            record = (announcement_date, stock_code, company_name, announcement_title, pdf_link, pdf_details[0], pdf_details[1], pdf_details[2], profile['industry'], profile['main_business'])
+            
             cursor.execute(insert_query, record)
-            print(f"  + 成功插入: {row['公告标题'][:20]}...")
+            print(f"  + 成功插入: {announcement_title[:20]}...")
         except Exception as e:
             print(f"  ! 处理单条记录时出错: {row.get('公告标题', 'N/A')[:20]}..., 错误: {e}"); conn.rollback(); continue
     
