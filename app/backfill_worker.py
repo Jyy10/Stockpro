@@ -80,8 +80,15 @@ def main():
                 def info(self, text): pass
             df = dh.scrape_akshare(keywords, single_date, single_date, DummyPlaceholder())
         
-        if df is None or df.empty:
+    # --- 【这就是修正后的代码】 ---
+    if df is None or df.empty:
         print("今天没有找到相关公告。"); conn.close(); return
+
+    print(f"找到 {len(df)} 条公告，开始处理...")
+    unique_codes = df['股票代码'].unique().tolist()
+    company_profiles = get_company_profiles(unique_codes)
+    cursor = conn.cursor()
+    
             continue
 
         print(f"日期 {single_date}: 找到 {len(df)} 条公告，开始处理...")
