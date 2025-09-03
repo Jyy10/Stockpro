@@ -104,4 +104,4 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
             col_pdf1, col_pdf2, col_pdf3 = st.columns(3)
             col_pdf1.metric("拟并购公司名称", row.get('target_company', 'N/A')); col_pdf2.metric("交易对价", row.get('transaction_price', 'N/A'))
             col_pdf3.text_area("涉及交易股东", row.get('shareholders', 'N/A'), height=100, disabled=True); st.markdown("---")
-            st.info("这是一个纯
+            st.info("这是一个纯数据浏览器，财务信息需自行查询。")
