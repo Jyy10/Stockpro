@@ -1,4 +1,4 @@
-# .github/workflows/daily_fetch.yml (修正版 - 增加了工作目录)
+# .github/workflows/daily_fetch.yml (最终路径修正版)
 
 name: Announcement Fetcher
 
@@ -20,9 +20,9 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
 
-    # --- 【关键修改】在这里为所有 'run' 命令设置默认工作目录 ---
     defaults:
       run:
+        # --- 【关键修正】将 'stockpro' 修改为 'Stockpro' (S大写)，与您的文件夹名完全匹配 ---
         working-directory: ./Stockpro/app
 
     steps:
@@ -35,19 +35,16 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies for Worker
-        # 现在这个命令会在 ./stockpro/app 目录下执行，就能找到文件了
         run: pip install -r requirements_worker.txt
 
       - name: Run Daily Update Script
         if: github.event_name == 'schedule' || github.event.inputs.task_to_run == 'daily_update'
         env:
           DATABASE_URI: ${{ secrets.DATABASE_URI }}
-        # 这个命令也会在 ./stockpro/app 目录下执行
         run: python worker.py
 
       - name: Run Backfill Script
         if: github.event.inputs.task_to_run == 'backfill'
         env:
           DATABASE_URI: ${{ secrets.DATABASE_URI }}
-        # 这个命令也会在 ./stockpro/app 目录下执行
         run: python backfill_worker.py
