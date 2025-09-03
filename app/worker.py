@@ -1,48 +1,25 @@
-# worker.py (v1.7 - 最终修正版)
-
+# worker.py (v1.8 - 最终健壮版)
 import os
 import psycopg2
 import pandas as pd
-from datetime import date
-import data_handler as dh # data_handler.py v1.7 (稳定版)
+from datetime import date, timedelta
+import data_handler as dh
 import time
 import akshare as ak
 
 def connect_db():
-    """连接到数据库，并打印详细的调试信息"""
     try:
-        db_host = os.environ.get("DB_HOST")
-        db_port = os.environ.get("DB_PORT")
-        db_name = os.environ.get("DB_NAME")
-        db_user = os.environ.get("DB_USER")
-        db_password = os.environ.get("DB_PASSWORD")
-
-        print("--- 正在尝试连接数据库，使用以下参数 ---")
-        print(f"Host: {'已设置' if db_host else '未设置'}")
-        print(f"Port: {db_port}")
-        print(f"DB Name: {db_name}")
-        print(f"User: {db_user}")
-        print(f"Password: {'已设置' if db_password else '未设置'}")
-        print("---------------------------------------------")
-
+        db_host = os.environ.get("DB_HOST"); db_port = os.environ.get("DB_PORT"); db_name = os.environ.get("DB_NAME"); db_user = os.environ.get("DB_USER"); db_password = os.environ.get("DB_PASSWORD")
+        print("--- 正在尝试连接数据库，使用以下参数 ---"); print(f"Host: {'已设置' if db_host else '未设置'}"); print(f"Port: {db_port}"); print(f"DB Name: {db_name}"); print(f"User: {db_user}"); print(f"Password: {'已设置' if db_password else '未设置'}"); print("---------------------------------------------")
         if not all([db_host, db_port, db_name, db_user, db_password]):
-            print("错误：一个或多个数据库连接环境变量未设置或为空！请检查GitHub Secrets。")
-            return None
-
-        conn = psycopg2.connect(
-            host=db_host, port=db_port, dbname=db_name,
-            user=db_user, password=db_password, sslmode='require'
-        )
-        print("数据库连接成功！")
-        return conn
+            print("错误：一个或多个数据库连接环境变量未设置或为空！请检查GitHub Secrets。"); return None
+        conn = psycopg2.connect(host=db_host, port=db_port, dbname=db_name, user=db_user, password=db_password, sslmode='require')
+        print("数据库连接成功！"); return conn
     except Exception as e:
-        print(f"数据库连接失败，详细底层错误: {e}")
-        return None
+        print(f"数据库连接失败，详细底层错误: {e}"); return None
 
 def get_company_profiles(stock_codes):
-    """获取公司的基本信息（行业、主营业务）"""
-    profiles = {}
-    print(f"准备为 {len(stock_codes)} 家公司获取基本信息...")
+    profiles = {}; print(f"准备为 {len(stock_codes)} 家公司获取基本信息...")
     for code in stock_codes:
         try:
             profile_df = ak.stock_individual_info_em(symbol=code)
@@ -73,6 +50,7 @@ def main():
             def info(self, text): print(text)
         df = dh.scrape_akshare(keywords, today, today, DummyPlaceholder())
 
+    # --- 【这就是修正后的代码】 ---
     if df is None or df.empty:
         print("今天没有找到相关公告。"); conn.close(); return
 
