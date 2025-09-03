@@ -40,11 +40,11 @@ jobs:
       - name: Run Daily Update Script
         if: github.event_name == 'schedule' || github.event.inputs.task_to_run == 'daily_update'
         env:
-          DATABASE_URI: ${{ secrets.DATABASE_URI }}
+          DATABASE_URI: postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}?sslmode=require
         run: python worker.py
 
       - name: Run Backfill Script
         if: github.event.inputs.task_to_run == 'backfill'
         env:
-          DATABASE_URI: ${{ secrets.DATABASE_URI }}
+          DATABASE_URI: postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}?sslmode=require
         run: python backfill_worker.py
