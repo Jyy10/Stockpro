@@ -1,4 +1,4 @@
-# backfill_worker.py (v2.6 - Final Production Version)
+# backfill_worker.py (v2.7 - Targeted Diagnostic)
 import os
 import psycopg2
 import pandas as pd
@@ -21,7 +21,7 @@ def connect_db():
 def main():
     """主执行函数"""
     print("=============================================")
-    print("历史数据回补 Worker 开始运行...")
+    print("历史数据回补 Worker 开始运行 (靶向诊断模式)...")
     try:
         print(f"正在使用 akshare 版本: {ak.__version__}")
     except Exception as e:
@@ -31,13 +31,14 @@ def main():
     conn = connect_db()
     if not conn: return
 
-    # --- 【核心改进】使用更全面的关键词列表 ---
     keywords = ["重大资产", "重组", "收购", "购买资产", "发行股份", "吸收合并", "要约收购", "报告书", "预案", "草案", "控制权变更"]
     
-    end_date = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=270)
+    # --- 【核心改进】锁定特定日期进行诊断 ---
+    test_date = date(2025, 9, 3)
+    start_date = test_date
+    end_date = test_date
     
-    print(f"准备抓取从 {start_date} 到 {end_date} 的数据...")
+    print(f"准备专门抓取 {test_date} 的数据以进行诊断...")
     
     class DummyPlaceholder:
         def info(self, text): print(text)
