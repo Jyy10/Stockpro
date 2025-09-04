@@ -1,4 +1,4 @@
-# backfill_worker.py (v3.3 - Daily Processing)
+# backfill_worker.py (v3.4 - DB Fix & Refined Keywords)
 import os
 import psycopg2
 import pandas as pd
@@ -23,32 +23,47 @@ def connect_db():
         return None
 
 def setup_database(conn):
-    """确保数据库中有 announcements 表，并包含 UNIQUE 约束"""
+    """确保数据库中有 announcements 表，并强制添加 UNIQUE 约束"""
     print("--- 正在检查并创建数据表 (如果不存在)... ---")
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS announcements (
-        id SERIAL PRIMARY KEY,
-        announcement_date DATE NOT NULL,
-        stock_code VARCHAR(10),
-        company_name VARCHAR(255),
-        announcement_title TEXT NOT NULL,
-        pdf_link TEXT,
-        target_company TEXT,
-        transaction_price TEXT,
-        shareholders TEXT,
-        industry TEXT,
-        main_business TEXT,
-        UNIQUE(announcement_date, announcement_title)
-    );
-    """
     try:
         with conn.cursor() as cursor:
+            # 步骤1: 确保表存在
+            create_table_query = """
+            CREATE TABLE IF NOT EXISTS announcements (
+                id SERIAL PRIMARY KEY,
+                announcement_date DATE NOT NULL,
+                stock_code VARCHAR(10),
+                company_name VARCHAR(255),
+                announcement_title TEXT NOT NULL,
+                pdf_link TEXT,
+                target_company TEXT,
+                transaction_price TEXT,
+                shareholders TEXT,
+                industry TEXT,
+                main_business TEXT
+            );
+            """
             cursor.execute(create_table_query)
+            
+            # 步骤2: 尝试添加 UNIQUE 约束，如果已存在则会报错，我们捕获并忽略
+            add_constraint_query = """
+            ALTER TABLE announcements
+            ADD CONSTRAINT unique_announcement_date_title
+            UNIQUE (announcement_date, announcement_title);
+            """
+            try:
+                cursor.execute(add_constraint_query)
+                print("成功为数据表添加 UNIQUE 约束。")
+            except psycopg2.errors.DuplicateObject:
+                # 这个错误意味着约束已经存在，是正常情况
+                print("UNIQUE 约束已存在，无需添加。")
+                conn.rollback() # 回滚失败的 ALTER TABLE 事务
+            
         conn.commit()
         print("数据表 'announcements' 已准备就绪。")
         return True
     except Exception as e:
-        print(f"创建数据表失败: {e}")
+        print(f"数据库设置失败: {e}")
         conn.rollback()
         return False
 
@@ -64,12 +79,11 @@ def main():
         if conn: conn.close()
         return
 
-    # --- 准备日期范围和关键词 ---
+    # --- 准备日期范围和关键词 (已根据您的要求精简) ---
     end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=270)
     keywords = [
-        "重大资产", "重组", "草案", "预案", "发行股份", "购买资产",
-        "吸收合并", "收购", "要约收购", "报告书"
+        "重组", "购买资产", "草案", "预案"
     ]
     
     date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
@@ -78,19 +92,18 @@ def main():
     total_failed_inserts = 0
 
     print(f"\n--- 准备处理从 {start_date} 到 {end_date} 共 {total_days} 天的数据 ---")
+    print(f"--- 使用关键词: {keywords} ---")
 
     # --- 每日循环处理 ---
     for i, single_date in enumerate(reversed(date_list)):
         print("\n" + "="*20 + f" 正在处理日期: {single_date} ({i+1}/{total_days}) " + "="*20)
 
-        # 步骤1: 抓取并筛选当天数据
         daily_announcements_df = dh.scrape_akshare(keywords, single_date, single_date)
 
         if daily_announcements_df.empty:
             print(f"  - 在 {single_date} 未找到或匹配到任何相关公告。")
             continue
 
-        # 步骤2: 准备将当天数据入库
         print(f"  - 匹配到 {len(daily_announcements_df)} 条公告，准备入库...")
         
         successful_inserts_today = 0
@@ -118,7 +131,6 @@ def main():
                     total_failed_inserts += 1
                     conn.rollback()
         
-        # 步骤3: 每日提交事务
         if successful_inserts_today > 0:
             print(f"  - 当日新插入 {successful_inserts_today} 条记录。正在提交...")
             conn.commit()
@@ -126,7 +138,7 @@ def main():
         else:
             print("  - 当日无新记录入库（可能均已存在）。")
             
-        time.sleep(1) # 短暂休息，避免过于频繁地请求
+        time.sleep(1)
 
     conn.close()
 
