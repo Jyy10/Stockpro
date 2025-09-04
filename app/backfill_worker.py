@@ -1,4 +1,4 @@
-# backfill_worker.py (v3.2 - Enhanced Logging)
+# backfill_worker.py (v3.3 - Daily Processing)
 import os
 import psycopg2
 import pandas as pd
@@ -64,65 +64,77 @@ def main():
         if conn: conn.close()
         return
 
-    # --- 步骤1: 批量抓取数据 ---
-    print("\n--- 步骤1: 批量抓取相关公告 ---")
+    # --- 准备日期范围和关键词 ---
     end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=270)
     keywords = [
         "重大资产", "重组", "草案", "预案", "发行股份", "购买资产",
         "吸收合并", "收购", "要约收购", "报告书"
     ]
+    
+    date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
+    total_days = len(date_list)
+    total_successful_inserts = 0
+    total_failed_inserts = 0
 
-    all_announcements_df = dh.scrape_akshare(keywords, start_date, end_date)
+    print(f"\n--- 准备处理从 {start_date} 到 {end_date} 共 {total_days} 天的数据 ---")
 
-    if all_announcements_df.empty:
-        print(f"在 {start_date} 到 {end_date} 期间未找到或匹配到任何相关公告。")
-        conn.close()
-        return
+    # --- 每日循环处理 ---
+    for i, single_date in enumerate(reversed(date_list)):
+        print("\n" + "="*20 + f" 正在处理日期: {single_date} ({i+1}/{total_days}) " + "="*20)
 
-    # --- 【新增】打印匹配到的标题 ---
-    print("\n" + "="*20 + f" 匹配到 {len(all_announcements_df)} 条公告，准备入库 " + "="*20)
-    for index, row in all_announcements_df.iterrows():
-        print(f"  - [匹配] {row.get('公告日期')} - {row.get('公告标题')}")
-    print("="* (44 + len(str(len(all_announcements_df)))))
+        # 步骤1: 抓取并筛选当天数据
+        daily_announcements_df = dh.scrape_akshare(keywords, single_date, single_date)
 
-    # --- 步骤2: 尝试将所有匹配到的数据写入数据库 ---
-    successful_inserts = 0
-    failed_inserts = 0
+        if daily_announcements_df.empty:
+            print(f"  - 在 {single_date} 未找到或匹配到任何相关公告。")
+            continue
 
-    with conn.cursor() as cursor:
-        for index, row in all_announcements_df.iterrows():
-            row_data = row.to_dict()
-            try:
-                insert_query = """
-                INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
-                """
-                record_to_insert = (
-                    row_data.get('公告日期'),
-                    row_data.get('股票代码', 'N/A'),
-                    row_data.get('公司名称', 'N/A'),
-                    row_data.get('公告标题'),
-                    row_data.get('PDF链接', 'N/A')
-                )
-                cursor.execute(insert_query, record_to_insert)
-                if cursor.rowcount > 0:
-                    successful_inserts += 1
-            except Exception as e:
-                print(f"  ! 插入 '{row_data.get('公告标题')}' 时发生意外错误: {e}")
-                failed_inserts += 1
-                conn.rollback()
+        # 步骤2: 准备将当天数据入库
+        print(f"  - 匹配到 {len(daily_announcements_df)} 条公告，准备入库...")
+        
+        successful_inserts_today = 0
+        with conn.cursor() as cursor:
+            for index, row in daily_announcements_df.iterrows():
+                row_data = row.to_dict()
+                try:
+                    insert_query = """
+                    INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
+                    """
+                    record_to_insert = (
+                        row_data.get('公告日期'),
+                        row_data.get('股票代码', 'N/A'),
+                        row_data.get('公司名称', 'N/A'),
+                        row_data.get('公告标题'),
+                        row_data.get('PDF链接', 'N/A')
+                    )
+                    cursor.execute(insert_query, record_to_insert)
+                    if cursor.rowcount > 0:
+                        successful_inserts_today += 1
+                except Exception as e:
+                    print(f"    ! 插入 '{row_data.get('公告标题')}' 时发生意外错误: {e}")
+                    total_failed_inserts += 1
+                    conn.rollback()
+        
+        # 步骤3: 每日提交事务
+        if successful_inserts_today > 0:
+            print(f"  - 当日新插入 {successful_inserts_today} 条记录。正在提交...")
+            conn.commit()
+            total_successful_inserts += successful_inserts_today
+        else:
+            print("  - 当日无新记录入库（可能均已存在）。")
+            
+        time.sleep(1) # 短暂休息，避免过于频繁地请求
 
-    print("\n--- 正在提交所有更改到数据库... ---")
-    conn.commit()
     conn.close()
 
+    # --- 最终总结 ---
     print("\n" + "="*40)
     print("--- 最终入库总结 ---")
-    print(f"成功新插入: {successful_inserts} 条记录。")
-    print(f"（有 {len(all_announcements_df) - successful_inserts} 条记录因已存在而被跳过）")
-    print(f"因插入失败而跳过: {failed_inserts} 条记录。")
+    print(f"在 {total_days} 天的处理中，共新插入: {total_successful_inserts} 条记录。")
+    print(f"因插入失败而跳过: {total_failed_inserts} 条记录。")
     print("="*40)
     print("历史数据回补 Worker 运行完毕。")
 
