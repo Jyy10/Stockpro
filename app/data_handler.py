@@ -1,4 +1,4 @@
-# data_handler.py (v2.3 - Direct Import Fix)
+# data_handler.py (v2.4 - Alternative Function Fix)
 
 import requests
 import pandas as pd
@@ -8,16 +8,7 @@ from PyPDF2 import PdfReader
 import time
 from datetime import timedelta
 from thefuzz import process as fuzz_process
-
-# --- FIX: Import the specific function directly to bypass environment loading issues ---
 import akshare as ak
-try:
-    from akshare import stock_zh_a_notice
-except ImportError:
-    print("FATAL: Could not import 'stock_zh_a_notice' directly from akshare. The library installation is likely corrupted or inaccessible.")
-    stock_zh_a_notice = None
-# --- END FIX ---
-
 
 def find_best_column_name(available_columns, target_keywords, min_score=85):
     """根据模糊匹配从可用列名中找到最佳匹配项"""
@@ -30,7 +21,7 @@ def find_best_column_name(available_columns, target_keywords, min_score=85):
                 highest_score = score
                 best_match = match
         except Exception:
-            continue # In case the list of choices is empty
+            continue
     if highest_score >= min_score:
         return best_match
     else:
@@ -46,7 +37,6 @@ def get_company_profiles(stock_codes):
     for code in valid_codes:
         profile_data = {'industry': '查询失败', 'main_business': '查询失败'}
         try:
-            # 主数据源: cninfo
             print(f"  - 尝试从 cninfo 获取 {code} 的信息...")
             profile_df = ak.stock_profile_cninfo(symbol=code)
             industry = profile_df[profile_df['item'] == '行业']['value'].iloc[0]
@@ -56,7 +46,6 @@ def get_company_profiles(stock_codes):
         except Exception as e_cninfo:
             print(f"  ! [cninfo] 获取 {code} 档案失败: {e_cninfo}。正在尝试备用源...")
             try:
-                # 备用数据源: East Money
                 profile_df_em = ak.stock_individual_info_em(symbol=code)
                 industry = profile_df_em[profile_df_em['item'] == '行业']['value'].iloc[0]
                 main_business = profile_df_em[profile_df_em['item'] == '主营业务']['value'].iloc[0]
@@ -70,28 +59,24 @@ def get_company_profiles(stock_codes):
     return profiles
 
 def scrape_akshare(keywords, start_date, end_date, placeholder):
-    """使用 ak.stock_zh_a_notice 函数从巨潮资讯网抓取公告"""
-    if stock_zh_a_notice is None:
-        print("无法执行抓取，因为 'stock_zh_a_notice' 函数未能成功导入。")
-        return pd.DataFrame()
-
+    """使用 ak.stock_notice_report 函数从巨潮资讯网抓取公告"""
     all_results_df_list = []
     delta = end_date - start_date
     date_list = [start_date + timedelta(days=i) for i in range(delta.days + 1)]
     total_days = len(date_list)
-    markets = ['sh', 'sz']
+    markets = {"sh": "上海证券交易所", "sz": "深圳证券交易所"}
 
     for i, single_date in enumerate(reversed(date_list)):
         date_str = single_date.strftime('%Y%m%d')
         placeholder.info(f"⏳ 正在反向检索数据源: {date_str} ({i+1}/{total_days})...")
-        for market in markets:
+        for market_code, market_name in markets.items():
             try:
-                # --- FIX: Call the directly imported function ---
-                daily_notices_df = stock_zh_a_notice(market=market, date=date_str)
+                # --- FIX: Use a more stable, alternative function ---
+                daily_notices_df = ak.stock_notice_report(market=market_name, date=date_str)
                 if daily_notices_df is not None and not daily_notices_df.empty:
                     all_results_df_list.append(daily_notices_df)
             except Exception as e:
-                print(f"AkShare-{market}: 在为 {date_str} 获取数据时发生错误: {e}")
+                print(f"AkShare-{market_code}: 在为 {date_str} 获取数据时发生错误: {e}")
             time.sleep(0.5)
 
     if not all_results_df_list: return pd.DataFrame()
@@ -99,7 +84,7 @@ def scrape_akshare(keywords, start_date, end_date, placeholder):
     all_results_df = pd.concat(all_results_df_list, ignore_index=True)
     print(f"抓取完成：在应用筛选前共找到 {len(all_results_df)} 条公告。")
 
-    title_col = find_best_column_name(all_results_df.columns, ['title', '公告标题', '标题'])
+    title_col = find_best_column_name(all_results_df.columns, ['公告标题', '标题'])
     if not title_col:
         print("警告：无法识别出'标题'列，无法进行关键词筛选。"); return pd.DataFrame()
 
@@ -111,9 +96,9 @@ def scrape_akshare(keywords, start_date, end_date, placeholder):
 
     final_df = pd.DataFrame()
     column_targets = {
-        '股票代码': ['code', '股票代码', '代码'], '公司名称': ['name', '股票简称', '公司名称', '简称'],
-        '公告标题': ['title', '公告标题', '标题'], '公告日期': ['date', '公告日期', '日期'],
-        'PDF链接': ['url', '公告链接', '链接']
+        '股票代码': ['股票代码', '代码'], '公司名称': ['股票简称', '公司名称'],
+        '公告标题': ['公告标题', '标题'], '公告日期': ['公告日期', '日期'],
+        'PDF链接': ['公告链接', '链接']
     }
     
     for target_col, possible_names in column_targets.items():
@@ -123,9 +108,9 @@ def scrape_akshare(keywords, start_date, end_date, placeholder):
 
     pdf_link_col = 'PDF链接'
     if pdf_link_col in final_df.columns and not final_df[pdf_link_col].empty:
-        base_url = 'http://static.cninfo.com.cn/'
+        base_url = 'http://static.cninfo.com.cn'
         final_df[pdf_link_col] = final_df[pdf_link_col].apply(
-            lambda url: base_url + url if isinstance(url, str) and not url.startswith('http') else url
+            lambda url: base_url + url if isinstance(url, str) and url.startswith('/') else url
         )
 
     date_col = '公告日期'
