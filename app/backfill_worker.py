@@ -1,6 +1,7 @@
-# backfill_worker.py (v3.4 - DB Fix & Refined Keywords)
+# backfill_worker.py (v3.5 - Final DB Fix)
 import os
 import psycopg2
+import psycopg2.errors
 import pandas as pd
 from datetime import date, timedelta
 import time
@@ -23,8 +24,8 @@ def connect_db():
         return None
 
 def setup_database(conn):
-    """确保数据库中有 announcements 表，并强制添加 UNIQUE 约束"""
-    print("--- 正在检查并创建数据表 (如果不存在)... ---")
+    """确保数据库表结构正确，管理 UNIQUE 约束"""
+    print("--- 正在检查并修复数据表结构... ---")
     try:
         with conn.cursor() as cursor:
             # 步骤1: 确保表存在
@@ -45,18 +46,26 @@ def setup_database(conn):
             """
             cursor.execute(create_table_query)
             
-            # 步骤2: 尝试添加 UNIQUE 约束，如果已存在则会报错，我们捕获并忽略
-            add_constraint_query = """
+            # 步骤2: (关键修复) 移除可能存在的、有问题的 pdf_link 唯一约束
+            drop_pdf_link_constraint_query = """
+            ALTER TABLE announcements
+            DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;
+            """
+            cursor.execute(drop_pdf_link_constraint_query)
+            print("已移除旧的 pdf_link 约束（如果存在）。")
+
+            # 步骤3: 确保我们需要的、正确的 UNIQUE 约束存在
+            add_correct_constraint_query = """
             ALTER TABLE announcements
             ADD CONSTRAINT unique_announcement_date_title
             UNIQUE (announcement_date, announcement_title);
             """
             try:
-                cursor.execute(add_constraint_query)
-                print("成功为数据表添加 UNIQUE 约束。")
+                cursor.execute(add_correct_constraint_query)
+                print("成功为数据表应用正确的 UNIQUE 约束。")
             except psycopg2.errors.DuplicateObject:
                 # 这个错误意味着约束已经存在，是正常情况
-                print("UNIQUE 约束已存在，无需添加。")
+                print("正确的 UNIQUE 约束已存在，无需更改。")
                 conn.rollback() # 回滚失败的 ALTER TABLE 事务
             
         conn.commit()
