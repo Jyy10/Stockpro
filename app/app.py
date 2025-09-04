@@ -1,4 +1,4 @@
-# app.py (v4.0 - Robust Pathing)
+# app.py (v4.1 - Graceful Degradation)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -12,7 +12,21 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 # 将该目录添加到系统路径中，确保可以找到同级的模块
 sys.path.append(current_dir)
 
-import data_handler as dh
+# --- 【核心改进】安全导入可选模块 ---
+DATA_HANDLER_AVAILABLE = False
+DH_IMPORT_ERROR = ""
+try:
+    import data_handler as dh
+    DATA_HANDLER_AVAILABLE = True
+except ImportError as e:
+    # 记录错误信息，稍后在侧边栏显示
+    DH_IMPORT_ERROR = (
+        f"无法加载后台数据模块 (data_handler): {e}\n\n"
+        "实时财务数据刷新功能将不可用。\n\n"
+        "**解决方案**: 请检查应用的依赖项配置 (如 requirements.txt)，"
+        "确保已包含 `PyPDF2` 和 `akshare` 库。"
+    )
+    dh = None
 
 # --- 页面配置 ---
 st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", layout="wide")
@@ -25,23 +39,17 @@ def init_connection():
         db_secrets = st.secrets.get("database")
         if db_secrets:
             conn = psycopg2.connect(
-                host=db_secrets.get("host"),
-                port=db_secrets.get("port"),
-                dbname=db_secrets.get("dbname"),
-                user=db_secrets.get("user"),
-                password=db_secrets.get("password"),
-                sslmode='require'
+                host=db_secrets.get("host"), port=db_secrets.get("port"),
+                dbname=db_secrets.get("dbname"), user=db_secrets.get("user"),
+                password=db_secrets.get("password"), sslmode='require'
             )
             return conn
         # 如果 Secrets 不存在，尝试从环境变量获取 (适用于本地调试)
         elif all(os.environ.get(k) for k in ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
             conn = psycopg2.connect(
-                host=os.environ.get("DB_HOST"),
-                port=os.environ.get("DB_PORT"),
-                dbname=os.environ.get("DB_NAME"),
-                user=os.environ.get("DB_USER"),
-                password=os.environ.get("DB_PASSWORD"),
-                sslmode='require'
+                host=os.environ.get("DB_HOST"), port=os.environ.get("DB_PORT"),
+                dbname=os.environ.get("DB_NAME"), user=os.environ.get("DB_USER"),
+                password=os.environ.get("DB_PASSWORD"), sslmode='require'
             )
             return conn
         else:
@@ -60,6 +68,10 @@ st.markdown("数据来源: 由后台Worker每日自动更新")
 with st.sidebar:
     st.header("🔍 筛选条件")
     
+    # 如果 data_handler 导入失败，在此处显示一个明确的警告
+    if not DATA_HANDLER_AVAILABLE:
+        st.warning(DH_IMPORT_ERROR)
+
     # --- 数据库状态显示 ---
     if conn:
         try:
@@ -152,10 +164,15 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
 
             st.markdown("---")
             st.subheader("上市公司快照 (可刷新)")
-            if st.button("刷新实时财务数据", key=f"detail_{index}", help="仅当股票代码有效时可用", disabled=(not stock_code or stock_code == 'N/A')):
-                with st.spinner("正在刷新..."):
-                    financial_data = dh.get_stock_financial_data([stock_code])
-                    st.session_state[f"fin_{index}"] = financial_data.iloc[0] if not financial_data.empty else "nodata"
+
+            # --- 【核心改进】根据模块是否可用，决定显示按钮还是提示信息 ---
+            if DATA_HANDLER_AVAILABLE:
+                if st.button("刷新实时财务数据", key=f"detail_{index}", help="仅当股票代码有效时可用", disabled=(not stock_code or stock_code == 'N/A')):
+                    with st.spinner("正在刷新..."):
+                        financial_data = dh.get_stock_financial_data([stock_code])
+                        st.session_state[f"fin_{index}"] = financial_data.iloc[0] if not financial_data.empty else "nodata"
+            else:
+                st.markdown("_(功能禁用：缺少后台依赖库)_")
 
             if f"fin_{index}" in st.session_state:
                 financials = st.session_state[f"fin_{index}"]
