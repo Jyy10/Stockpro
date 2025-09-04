@@ -1,4 +1,4 @@
-# backfill_worker.py (v3.1 - Robust Insertion)
+# backfill_worker.py (v3.2 - Enhanced Logging)
 import os
 import psycopg2
 import pandas as pd
@@ -69,75 +69,63 @@ def main():
     end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=270)
     keywords = [
-        "重大资产", "重组", "草案", "预案", "发行股份", "购买资产", 
+        "重大资产", "重组", "草案", "预案", "发行股份", "购买资产",
         "吸收合并", "收购", "要约收购", "报告书"
     ]
-    
+
     all_announcements_df = dh.scrape_akshare(keywords, start_date, end_date)
 
     if all_announcements_df.empty:
-        print(f"在 {start_date} 到 {end_date} 期间未找到相关公告。")
+        print(f"在 {start_date} 到 {end_date} 期间未找到或匹配到任何相关公告。")
         conn.close()
         return
 
+    # --- 【新增】打印匹配到的标题 ---
+    print("\n" + "="*20 + f" 匹配到 {len(all_announcements_df)} 条公告，准备入库 " + "="*20)
+    for index, row in all_announcements_df.iterrows():
+        print(f"  - [匹配] {row.get('公告日期')} - {row.get('公告标题')}")
+    print("="* (44 + len(str(len(all_announcements_df)))))
+
     # --- 步骤2: 尝试将所有匹配到的数据写入数据库 ---
-    print(f"\n--- 步骤2: 准备将 {len(all_announcements_df)} 条匹配记录写入数据库 ---")
     successful_inserts = 0
     failed_inserts = 0
-    
+
     with conn.cursor() as cursor:
         for index, row in all_announcements_df.iterrows():
             row_data = row.to_dict()
-            title_preview = (row_data.get('公告标题', 'No Title') or 'No Title')[:50]
-            print(f"\n[Row {index+1}/{len(all_announcements_df)}] 正在处理: {title_preview}...")
-            
             try:
-                ann_date = row_data.get('公告日期')
-                title = row_data.get('公告标题')
-
-                if not ann_date or not title:
-                    print("  - \033[93m跳过\033[0m: 缺少公告日期或标题。")
-                    continue
-
-                # 使用 ON CONFLICT 实现高效的数据库级去重
                 insert_query = """
                 INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
                 """
                 record_to_insert = (
-                    ann_date,
+                    row_data.get('公告日期'),
                     row_data.get('股票代码', 'N/A'),
                     row_data.get('公司名称', 'N/A'),
-                    title,
+                    row_data.get('公告标题'),
                     row_data.get('PDF链接', 'N/A')
                 )
-                
                 cursor.execute(insert_query, record_to_insert)
-                
-                # cursor.rowcount 会告诉我们上一条命令影响了多少行
                 if cursor.rowcount > 0:
-                    print("  - \033[92m成功\033[0m: 新记录已插入。")
                     successful_inserts += 1
-                else:
-                    print("  - \033[94m跳过\033[0m: 记录已存在于数据库中。")
-
             except Exception as e:
-                print(f"  - \033[91m失败\033[0m: 插入时发生意外错误: {e}")
+                print(f"  ! 插入 '{row_data.get('公告标题')}' 时发生意外错误: {e}")
                 failed_inserts += 1
-                conn.rollback() # 回滚当前失败的事务，准备处理下一条
-    
+                conn.rollback()
+
     print("\n--- 正在提交所有更改到数据库... ---")
     conn.commit()
     conn.close()
-    
+
     print("\n" + "="*40)
     print("--- 最终入库总结 ---")
     print(f"成功新插入: {successful_inserts} 条记录。")
+    print(f"（有 {len(all_announcements_df) - successful_inserts} 条记录因已存在而被跳过）")
     print(f"因插入失败而跳过: {failed_inserts} 条记录。")
-    print(f"（因数据库中已存在而被跳过的记录未计入失败数）")
     print("="*40)
     print("历史数据回补 Worker 运行完毕。")
 
 if __name__ == "__main__":
     main()
+
