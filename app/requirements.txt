@@ -4,3 +4,5 @@ pandas
 psycopg2-binary
 thefuzz
 python-Levenshtein
+PyPDF2
+akshare
