@@ -1,4 +1,4 @@
-# backfill_worker.py (v2.7 - Targeted Diagnostic)
+# backfill_worker.py (v2.9 - Enhanced Deduplication)
 import os
 import psycopg2
 import pandas as pd
@@ -21,7 +21,7 @@ def connect_db():
 def main():
     """主执行函数"""
     print("=============================================")
-    print("历史数据回补 Worker 开始运行 (靶向诊断模式)...")
+    print("历史数据回补 Worker 开始运行 (增强去重模式)...")
     try:
         print(f"正在使用 akshare 版本: {ak.__version__}")
     except Exception as e:
@@ -33,12 +33,10 @@ def main():
 
     keywords = ["重大资产", "重组", "收购", "购买资产", "发行股份", "吸收合并", "要约收购", "报告书", "预案", "草案", "控制权变更"]
     
-    # --- 【核心改进】锁定特定日期进行诊断 ---
-    test_date = date(2025, 9, 3)
-    start_date = test_date
-    end_date = test_date
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=270)
     
-    print(f"准备专门抓取 {test_date} 的数据以进行诊断...")
+    print(f"准备抓取从 {start_date} 到 {end_date} 的数据...")
     
     class DummyPlaceholder:
         def info(self, text): print(text)
@@ -57,29 +55,48 @@ def main():
     print("\n步骤3: 开始逐条解析公告并存入数据库...")
     cursor = conn.cursor()
     successful_inserts = 0
+    processed_in_this_run = set() # 用于跟踪本次运行中已处理的公告
     
     for index, row in announcements_df.iterrows():
         stock_code = row.get('股票代码', 'N/A')
-        pdf_link = row.get('PDF链接', '')
         announcement_title = row.get('公告标题', '无标题')
-        
-        print(f"\n  处理公告: {row.get('公告日期')} - {announcement_title[:50]}...")
+        announcement_date = row.get('公告日期')
+        company_name = row.get('公司名称', 'N/A')
+        pdf_link = row.get('PDF链接', 'N/A')
 
-        if stock_code == 'N/A' or not pdf_link.startswith('http'):
-            print(f"    - 核心信息不完整 (代码: {stock_code}, 链接: {pdf_link})，跳过。")
+        print(f"\n  处理公告: {announcement_date} - {announcement_title[:50]}...")
+
+        if stock_code == 'N/A' or announcement_title == '无标题':
+            print(f"    - 缺少股票代码或标题，无法入库，跳过。")
             continue
 
         try:
-            cursor.execute("SELECT id FROM announcements WHERE pdf_link = %s", (pdf_link,))
+            # --- 增强去重检查 ---
+            # 1. 检查本轮是否已处理 (基于标题和日期)
+            unique_key = (announcement_title, str(announcement_date))
+            if unique_key in processed_in_this_run:
+                print(f"    - 公告已在本轮处理过，跳过。")
+                continue
+
+            # 2. 检查数据库中是否已存在
+            if pdf_link != 'N/A' and pdf_link.startswith('http'):
+                 cursor.execute("SELECT id FROM announcements WHERE pdf_link = %s", (pdf_link,))
+            else:
+                 cursor.execute("SELECT id FROM announcements WHERE announcement_title = %s AND announcement_date = %s", (announcement_title, announcement_date))
+
             if cursor.fetchone():
                 print(f"    - 公告已存在于数据库，跳过。")
                 continue
             
-            print(f"    - 正在解读PDF...")
-            pdf_details = dh.extract_details_from_pdf(pdf_link)
+            # --- 尝试获取增强信息 ---
+            pdf_details = ("待查询", "待查询", "待查询")
+            if pdf_link != 'N/A' and pdf_link.startswith('http'):
+                print(f"    - 正在解读PDF...")
+                pdf_details = dh.extract_details_from_pdf(pdf_link)
             
-            profile = company_profiles.get(stock_code, {'industry': '查询失败', 'main_business': '查询失败'})
+            profile = company_profiles.get(stock_code, {'industry': '待查询', 'main_business': '待查询'})
             
+            # --- 准备并执行入库 ---
             insert_query = """
                 INSERT INTO announcements 
                 (announcement_date, stock_code, company_name, announcement_title, pdf_link, 
@@ -87,13 +104,15 @@ def main():
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """
             record = (
-                row.get('公告日期'), stock_code, row.get('公司名称', 'N/A'), announcement_title, pdf_link,
+                announcement_date, stock_code, company_name, announcement_title, pdf_link,
                 pdf_details[0], pdf_details[1], pdf_details[2],
-                profile['industry'], profile['main_business']
+                profile.get('industry', '待查询'), profile.get('main_business', '待查询')
             )
             
             cursor.execute(insert_query, record)
-            print(f"    => 成功存入数据库！")
+            processed_in_this_run.add(unique_key) # 标记为本轮已处理
+            
+            print(f"    => 成功将基本信息存入数据库！")
             successful_inserts += 1
 
         except psycopg2.Error as db_err:
