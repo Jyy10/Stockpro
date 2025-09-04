@@ -1,4 +1,4 @@
-# worker.py (v2.0 - Final with Version Check)
+# worker.py (v2.1 - Enhanced Diagnostics)
 import os
 import psycopg2
 import pandas as pd
@@ -19,9 +19,11 @@ def connect_db():
         print(f"数据库连接失败，底层错误: {e}"); return None
 
 def main():
-    # --- 关键诊断步骤：打印 akshare 版本 ---
+    # --- 关键诊断步骤：打印 akshare 版本、路径及函数存在性 ---
     print(f"==============================================")
     print(f"诊断信息：当前运行的 akshare 版本为: {ak.__version__}")
+    print(f"诊断信息：akshare 模块加载路径为: {ak.__file__}")
+    print(f"诊断信息：'stock_zh_a_notice' 函数是否存在: {'stock_zh_a_notice' in dir(ak)}")
     print(f"==============================================")
 
     print("每日更新 Worker 开始运行...")
