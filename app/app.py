@@ -1,11 +1,18 @@
-# app.py (v3.9 - DB Status Check)
-
+# app.py (v4.0 - Robust Pathing)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
 import psycopg2
 import os
-import data_handler as dh # 确保 data_handler.py 在同一目录下
+import sys
+
+# --- 【核心改进】动态调整模块搜索路径 ---
+# 获取当前脚本所在的目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 将该目录添加到系统路径中，确保可以找到同级的模块
+sys.path.append(current_dir)
+
+import data_handler as dh
 
 # --- 页面配置 ---
 st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", layout="wide")
@@ -53,7 +60,7 @@ st.markdown("数据来源: 由后台Worker每日自动更新")
 with st.sidebar:
     st.header("🔍 筛选条件")
     
-    # --- 【核心改进】数据库状态显示 ---
+    # --- 数据库状态显示 ---
     if conn:
         try:
             with conn.cursor() as cursor:
