@@ -1,4 +1,4 @@
-# data_handler.py (v2.0 - API Function Fix)
+# data_handler.py (v2.1 - Diagnostic Version)
 
 import requests
 import pandas as pd
@@ -92,17 +92,32 @@ def scrape_akshare(keywords, start_date, end_date, placeholder):
         return pd.DataFrame()
     
     all_results_df = pd.concat(all_results_df_list, ignore_index=True)
-    print(f"AkShare-notice raw columns returned: {all_results_df.columns.tolist()}")
+    # --- DIAGNOSTIC STEP 1 ---
+    # Print the total number of announcements found BEFORE filtering.
+    print(f"DIAGNOSTIC: Total announcements fetched before filtering: {len(all_results_df)}")
+    if not all_results_df.empty:
+        print("DIAGNOSTIC: Sample of fetched data:")
+        print(all_results_df.head())
+
 
     title_col = find_best_column_name(all_results_df.columns, ['title', '公告标题', '标题'])
     if not title_col:
         print("Warning: Could not find a recognizable 'title' column. Filtering not possible.")
         return pd.DataFrame()
 
-    keyword_pattern = '|'.join(keywords)
-    filtered_df = all_results_df[all_results_df[title_col].str.contains(keyword_pattern, na=False)].copy()
+    # --- DIAGNOSTIC STEP 2 ---
+    # Temporarily bypass the keyword filtering to test the data pipeline.
+    # To restore original functionality, uncomment the following two lines and delete the "filtered_df = all_results_df.copy()" line.
+    # keyword_pattern = '|'.join(keywords)
+    # filtered_df = all_results_df[all_results_df[title_col].str.contains(keyword_pattern, na=False)].copy()
+    
+    print("DIAGNOSTIC: Bypassing keyword filtering for this test run.")
+    filtered_df = all_results_df.copy()
+
 
     if filtered_df.empty:
+        # This will now only be true if the API returns nothing at all.
+        print("No announcements found at all for the given date range.")
         return pd.DataFrame()
 
     final_df = pd.DataFrame()
