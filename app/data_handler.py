@@ -1,4 +1,4 @@
-# data_handler.py (v2.4 - Alternative Function Fix)
+# data_handler.py (v2.5 - Final API Call Fix)
 
 import requests
 import pandas as pd
@@ -64,20 +64,18 @@ def scrape_akshare(keywords, start_date, end_date, placeholder):
     delta = end_date - start_date
     date_list = [start_date + timedelta(days=i) for i in range(delta.days + 1)]
     total_days = len(date_list)
-    markets = {"sh": "上海证券交易所", "sz": "深圳证券交易所"}
 
     for i, single_date in enumerate(reversed(date_list)):
         date_str = single_date.strftime('%Y%m%d')
-        placeholder.info(f"⏳ 正在反向检索数据源: {date_str} ({i+1}/{total_days})...")
-        for market_code, market_name in markets.items():
-            try:
-                # --- FIX: Use a more stable, alternative function ---
-                daily_notices_df = ak.stock_notice_report(market=market_name, date=date_str)
-                if daily_notices_df is not None and not daily_notices_df.empty:
-                    all_results_df_list.append(daily_notices_df)
-            except Exception as e:
-                print(f"AkShare-{market_code}: 在为 {date_str} 获取数据时发生错误: {e}")
-            time.sleep(0.5)
+        placeholder.info(f"⏳ 正在检索数据源: {date_str} ({i+1}/{total_days})...")
+        try:
+            # --- FIX: Call the function once per date, without the 'market' argument ---
+            daily_notices_df = ak.stock_notice_report(date=date_str)
+            if daily_notices_df is not None and not daily_notices_df.empty:
+                all_results_df_list.append(daily_notices_df)
+        except Exception as e:
+            print(f"AkShare: 在为 {date_str} 获取数据时发生错误: {e}")
+        time.sleep(0.5)
 
     if not all_results_df_list: return pd.DataFrame()
     
