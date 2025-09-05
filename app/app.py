@@ -1,4 +1,4 @@
-# app.py (v4.0 - Intelligent Display)
+# app.py (v4.1 - Fix & Enhanced UI)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -7,22 +7,17 @@ import sys, os
 
 # --- 动态路径配置，确保能找到 data_handler ---
 def setup_path():
-    # 适用于在类似 'src/stockpro/app' 结构中运行的场景
-    # 将 'src/stockpro' 添加到系统路径
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(current_dir))
     if project_root not in sys.path:
         sys.path.append(project_root)
     
-    # 尝试导入
     try:
         from app import data_handler as dh
         return dh
     except (ImportError, ModuleNotFoundError):
         st.sidebar.warning("""
         **警告**: 无法加载后台数据模块 (data_handler)。
-        这可能是由于缺少必要的库。
-        
         实时公司快照刷新功能将不可用。
         """)
         return None
@@ -51,7 +46,13 @@ with st.sidebar:
     st.header("🔍 筛选条件")
     today = date.today()
     default_start_date = today - timedelta(days=90)
-    date_range = st.date_input("选择公告日期范围", value=(default_start_date, today), format="YYYY-MM-DD")
+    # 【修复】为 date_input 添加唯一的 key，防止 StreamlitDuplicateElementId 错误
+    date_range = st.date_input(
+        "选择公告日期范围", 
+        value=(default_start_date, today), 
+        format="YYYY-MM-DD",
+        key="date_selector_main"
+    )
     keyword_input = st.text_input("输入标题/概要关键词筛选 (可选)")
     submit_button = st.button('🔍 查询数据库')
 
@@ -78,7 +79,6 @@ def run_query(start, end, keyword):
         st.session_state.announcement_list = pd.DataFrame()
         return
     try:
-        # 查询逻辑现在也会搜索 summary 字段
         query = "SELECT * FROM announcements WHERE announcement_date BETWEEN %s AND %s"
         params = [start, end]
         if keyword:
@@ -108,18 +108,32 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
     df = st.session_state.announcement_list
     st.success(f"为您找到 {len(df)} 条相关结果！")
     
+    # 【新增】首先展示一个清晰的概览表格
+    st.subheader("公告概览")
+    summary_df = df[['announcement_date', 'company_name', 'announcement_title']].rename(columns={
+        'announcement_date': '公告日期',
+        'company_name': '公司名称',
+        'announcement_title': '公告标题'
+    })
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    st.subheader("公告详情")
+
+    # 【优化】然后以卡片形式展示每一条的详细信息
     for index, row in df.iterrows():
-        expander_title = f"**{row.get('company_name', 'N/A')} ({row.get('stock_code', 'N/A')})** | {row['announcement_date'].strftime('%Y-%m-%d')}"
-        with st.expander(expander_title):
+        with st.container(border=True):
+            # 将标题和日期置于顶部
+            st.markdown(f"##### {row.get('announcement_title')}")
+            st.caption(f"公司: {row.get('company_name', 'N/A')} ({row.get('stock_code', 'N/A')}) | 日期: {row['announcement_date'].strftime('%Y-%m-%d')}")
             
-            col1, col2 = st.columns([2, 1]) # 让左侧更宽
+            col1, col2 = st.columns([2, 1])
             
-            # 左侧展示交易结构
             with col1:
-                st.subheader("智能解析概要")
+                st.markdown("**智能解析概要**")
                 summary = row.get('summary')
                 if pd.notna(summary) and "未能" not in summary:
-                    st.text_area("交易概要", summary, height=100, disabled=True, key=f"sum_{index}")
+                    st.text_area("交易概要:", summary, height=100, disabled=True, key=f"sum_{index}", label_visibility="collapsed")
                 else:
                     st.info("该公告的详细信息仍在等待后台解析...")
 
@@ -128,13 +142,11 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
                 st.markdown(f"**标 的 方:** `{row.get('target', '待解析')}`")
                 st.markdown(f"**交易价格:** `{row.get('transaction_price', '待解析')}`")
 
-            # 右侧展示公告发布方信息
             with col2:
-                st.subheader("公告方信息")
+                st.markdown("**公告方信息**")
                 st.markdown(f"**股票代码:** {row.get('stock_code', 'N/A')}")
                 st.markdown(f"**所属行业:** {row.get('industry', '待解析')}")
                 
-                # 刷新按钮
                 if dh and st.button("刷新公司快照", key=f"refresh_{index}", use_container_width=True,
                                     disabled=(not row.get('stock_code') or row.get('stock_code') == 'N/A')):
                      with st.spinner("正在刷新..."):
@@ -143,13 +155,9 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
 
                 if f"profile_{index}" in st.session_state:
                     profile_data = st.session_state[f"profile_{index}"]
-                    st.text_area("主营业务", profile_data.get('main_business', 'N/A'), height=150, disabled=True, key=f"biz_{index}")
+                    st.text_area("主营业务:", profile_data.get('main_business', 'N/A'), height=150, disabled=True, key=f"biz_{index}", label_visibility="collapsed")
                 
-            # 底部提供原始链接
-            st.markdown("---")
             pdf_link = row.get('pdf_link')
             if pd.notna(pdf_link) and pdf_link != 'N/A':
                 st.link_button("🔗 阅读原始公告 (PDF)", pdf_link)
-            else:
-                st.caption("无原始公告链接")
 
