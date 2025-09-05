@@ -1,4 +1,4 @@
-# worker.py (v4.4 - AI Enrichment)
+# worker.py (v4.5 - Conditional Update)
 import os
 import psycopg2
 import pandas as pd
@@ -96,7 +96,7 @@ async def enrichment_stage(conn):
 
 def main():
     print("="*40)
-    print(f"每日更新 Worker (v4.4 - AI) 开始运行...")
+    print(f"每日更新 Worker (v4.5) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
@@ -135,7 +135,13 @@ def main():
                     insert_query = """
                     INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
+                    ON CONFLICT (announcement_date, announcement_title)
+                    DO UPDATE SET
+                        stock_code = EXCLUDED.stock_code,
+                        company_name = EXCLUDED.company_name,
+                        pdf_link = EXCLUDED.pdf_link
+                    WHERE
+                        announcements.stock_code IS NULL OR announcements.stock_code = 'N/A';
                     """
                     record = (
                         row.get('公告日期'), stock_code,
@@ -146,15 +152,15 @@ def main():
                     if cursor.rowcount > 0:
                         daily_inserts += 1
                 except Exception as e:
-                    print(f"    ! 插入时出错: {e}")
+                    print(f"    ! 插入/更新时出错: {e}")
                     conn.rollback()
         
         conn.commit()
-        print(f"  - 当日新入库 {daily_inserts} 条记录。")
+        print(f"  - 当日处理完成 {daily_inserts} 条记录（新增或更新）。")
         total_new_inserts += daily_inserts
         time.sleep(1)
 
-    print(f"\n阶段1完成：总共新录入了 {total_new_inserts} 条基础公告。")
+    print(f"\n阶段1完成：总共处理了 {total_new_inserts} 条基础公告。")
 
     asyncio.run(enrichment_stage(conn))
 
