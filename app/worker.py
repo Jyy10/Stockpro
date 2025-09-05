@@ -1,109 +1,166 @@
-# worker.py (v2.6 - Final Production Version)
+# worker.py (v4.2 - Precise Filtering & Daily Processing)
 import os
 import psycopg2
 import pandas as pd
-from datetime import date
-import data_handler as dh
+from datetime import date, timedelta
 import time
 import akshare as ak
+# 确保 data_handler.py 在同一目录下或在Python路径中
+import data_handler as dh
 
 def connect_db():
     """连接到数据库"""
+    print("--- 正在尝试连接数据库... ---")
     try:
-        db_host = os.environ.get("DB_HOST"); db_port = os.environ.get("DB_PORT"); db_name = os.environ.get("DB_NAME"); db_user = os.environ.get("DB_USER"); db_password = os.environ.get("DB_PASSWORD")
-        if not all([db_host, db_port, db_name, db_user, db_password]):
-            print("错误：一个或多个数据库连接环境变量未设置或为空！"); return None
-        conn = psycopg2.connect(host=db_host, port=db_port, dbname=db_name, user=db_user, password=db_password, sslmode='require')
-        print("数据库连接成功！"); return conn
+        conn = psycopg2.connect(
+            host=os.environ.get("DB_HOST"), port=os.environ.get("DB_PORT"),
+            dbname=os.environ.get("DB_NAME"), user=os.environ.get("DB_USER"),
+            password=os.environ.get("DB_PASSWORD"), sslmode='require'
+        )
+        print("数据库连接成功！")
+        return conn
     except Exception as e:
-        print(f"数据库连接失败: {e}"); return None
+        print(f"数据库连接失败，底层错误: {e}")
+        return None
+
+def setup_database(conn):
+    """确保数据库表结构正确"""
+    # 此处逻辑与 backfill_worker 一致
+    print("--- 正在检查并修复数据库表结构... ---")
+    try:
+        with conn.cursor() as cursor:
+            # 检查并添加新列（如果不存在）
+            columns_to_add = {
+                "transaction_type": "VARCHAR(50)", "acquirer": "TEXT",
+                "target": "TEXT", "summary": "TEXT", "transaction_price": "TEXT"
+            }
+            for col, col_type in columns_to_add.items():
+                cursor.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_name='announcements' AND column_name='{col}') THEN
+                        ALTER TABLE announcements ADD COLUMN {col} {col_type};
+                    END IF;
+                END $$;
+                """)
+            
+            cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;")
+            cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS unique_announcement_date_title;")
+            cursor.execute("ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title UNIQUE (announcement_date, announcement_title);")
+        
+        conn.commit()
+        print("数据库表结构已准备就绪。")
+        return True
+    except psycopg2.errors.DuplicateObject:
+        conn.rollback()
+        return True
+    except Exception as e:
+        print(f"数据库设置失败: {e}")
+        conn.rollback()
+        return False
+
+def enrichment_stage(conn):
+    """第二阶段：智能增补"""
+    # 此处逻辑与 backfill_worker 一致
+    print("\n--- 阶段2: 开始智能增补公告详情 ---")
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id, pdf_link FROM announcements WHERE summary IS NULL OR summary = '未能从PDF中提取有效信息。' LIMIT 50;") # 每日更新处理50条
+            records_to_enrich = cursor.fetchall()
+
+            if not records_to_enrich:
+                print("阶段2完成：没有需要增补信息的公告。")
+                return
+            
+            print(f"找到 {len(records_to_enrich)} 条公告需要增补详细信息...")
+            
+            for record_id, pdf_link in records_to_enrich:
+                if not pdf_link or pdf_link == 'N/A':
+                    update_query = "UPDATE announcements SET summary = %s WHERE id = %s;"
+                    cursor.execute(update_query, ("无PDF链接，无法解析。", record_id))
+                    continue
+
+                trans_type, acquirer, target, price, summary = dh.extract_details_from_pdf(pdf_link)
+                
+                update_query = """
+                UPDATE announcements 
+                SET transaction_type = %s, acquirer = %s, target = %s, transaction_price = %s, summary = %s
+                WHERE id = %s;
+                """
+                cursor.execute(update_query, (trans_type, acquirer, target, price, summary, record_id))
+                time.sleep(1)
+        
+        conn.commit()
+    except Exception as e:
+        print(f"  ! 在增补阶段发生严重错误: {e}")
+        conn.rollback()
 
 def main():
-    """主执行函数"""
-    print("=============================================")
-    print("每日更新 Worker 开始运行...")
-    try:
-        print(f"正在使用 akshare 版本: {ak.__version__}")
-    except Exception as e:
-        print(f"无法获取 akshare 版本: {e}")
-    print("=============================================")
-    
+    print("="*40)
+    print(f"每日更新 Worker (v4.2) 开始运行...")
+    print(f"正在使用 akshare 版本: {ak.__version__}")
+    print("="*40)
+
     conn = connect_db()
-    if not conn: return
+    if not conn or not setup_database(conn):
+        if conn: conn.close()
+        return
 
-    # --- 【核心改进】使用更全面的关键词列表 ---
-    keywords = ["重大资产", "重组", "收购", "购买资产", "发行股份", "吸收合并", "要约收购", "报告书", "预案", "草案", "控制权变更"]
+    # --- 精准关键词定义 ---
+    core_keywords = ["重组", "购买资产", "资产出售"]
+    modifier_keywords = ["草案", "预案", "进展公告"]
+
+    # 只处理昨天和今天
+    end_date = date.today()
+    start_date = end_date - timedelta(days=1)
+    date_list = [start_date, end_date]
+
+    print("\n--- 阶段1: 开始按天快速录入基础公告 ---")
+    total_new_inserts = 0
     
-    today = date.today()
-    print(f"步骤1: 开始抓取日期 {today} 的相关公告...")
-    
-    class DummyPlaceholder:
-        def info(self, text): print(text)
-            
-    announcements_df = dh.scrape_akshare(keywords, today, today, DummyPlaceholder())
+    for single_date in reversed(date_list):
+        print(f"\n{'='*20} 正在处理日期: {single_date.strftime('%Y-%m-%d')} {'='*20}")
+        daily_df = dh.scrape_akshare_precisely(core_keywords, modifier_keywords, single_date, single_date)
 
-    if announcements_df is None or announcements_df.empty:
-        print("今天没有找到相关公告。Worker 运行完毕。"); conn.close(); return
-    print(f"步骤1完成：找到 {len(announcements_df)} 条相关公告。")
-
-    print("\n步骤2: 开始批量查找公司信息...")
-    unique_codes = announcements_df['股票代码'].unique().tolist()
-    company_profiles = dh.get_company_profiles(unique_codes)
-    print(f"步骤2完成：获取了 {len(company_profiles)} 家公司的档案。")
-
-    print("\n步骤3: 开始逐条解析公告并存入数据库...")
-    cursor = conn.cursor()
-    successful_inserts = 0
-    
-    for index, row in announcements_df.iterrows():
-        stock_code = row.get('股票代码', 'N/A')
-        pdf_link = row.get('PDF链接', '')
-        announcement_title = row.get('公告标题', '无标题')
-        
-        print(f"\n  处理公告: {announcement_title[:50]}...")
-
-        if stock_code == 'N/A' or not pdf_link.startswith('http'):
-            print(f"    - 核心信息不完整 (代码: {stock_code}, 链接: {pdf_link})，跳过。")
+        if daily_df.empty:
+            print("  - 当日未找到相关公告。")
             continue
 
-        try:
-            cursor.execute("SELECT id FROM announcements WHERE pdf_link = %s", (pdf_link,))
-            if cursor.fetchone():
-                print(f"    - 公告已存在于数据库，跳过。")
-                continue
-            
-            print(f"    - 正在解读PDF...")
-            pdf_details = dh.extract_details_from_pdf(pdf_link)
-            
-            profile = company_profiles.get(stock_code, {'industry': '查询失败', 'main_business': '查询失败'})
-            
-            insert_query = """
-                INSERT INTO announcements 
-                (announcement_date, stock_code, company_name, announcement_title, pdf_link, 
-                target_company, transaction_price, shareholders, industry, main_business) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-            """
-            record = (
-                row.get('公告日期'), stock_code, row.get('公司名称', 'N/A'), announcement_title, pdf_link,
-                pdf_details[0], pdf_details[1], pdf_details[2],
-                profile['industry'], profile['main_business']
-            )
-            
-            cursor.execute(insert_query, record)
-            print(f"    => 成功存入数据库！")
-            successful_inserts += 1
+        daily_inserts = 0
+        with conn.cursor() as cursor:
+            for _, row in daily_df.iterrows():
+                try:
+                    insert_query = """
+                    INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
+                    """
+                    record = (
+                        row.get('公告日期'), row.get('股票代码', 'N/A'),
+                        row.get('公司名称', 'N/A'), row.get('公告标题'),
+                        row.get('PDF链接', 'N/A')
+                    )
+                    cursor.execute(insert_query, record)
+                    if cursor.rowcount > 0:
+                        daily_inserts += 1
+                except Exception as e:
+                    print(f"    ! 插入时出错: {e}")
+                    conn.rollback()
+        
+        conn.commit()
+        print(f"  - 当日新入库 {daily_inserts} 条记录。")
+        total_new_inserts += daily_inserts
+        time.sleep(1)
 
-        except psycopg2.Error as db_err:
-            print(f"    ! 数据库操作错误: {db_err}"); conn.rollback()
-        except Exception as e:
-            print(f"    ! 处理该条记录时发生意外错误: {e}"); conn.rollback()
-    
-    conn.commit()
-    cursor.close()
+    print(f"\n阶段1完成：总共新录入了 {total_new_inserts} 条基础公告。")
+
+    enrichment_stage(conn)
+
     conn.close()
-    print(f"\n步骤3完成：成功处理并新插入 {successful_inserts} 条记录。")
+    print("\n" + "="*40)
     print("每日更新 Worker 运行完毕。")
+    print("="*40)
 
 if __name__ == "__main__":
     main()
-
