@@ -1,4 +1,4 @@
-# app.py (v5.7 - Datetime Fix)
+# app.py (v5.9 - Nested Grouping & Data Cleaning)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -50,11 +50,9 @@ def run_query(start, end, keyword):
         if keyword:
             query += " AND announcement_title ILIKE %s"
             params.append(f"%{keyword}%")
-        # 为了分组，一次性获取较多数据, 按日期降序，公司名升序
-        query += f" ORDER BY announcement_date DESC, company_name ASC, id DESC LIMIT 500"
+        # 增加数据加载上限，以显示更多公司
+        query += f" ORDER BY announcement_date DESC, company_name ASC, id DESC LIMIT 1000"
         df = pd.read_sql_query(query, conn, params=params)
-        # 确保 company_name 不是 None
-        df['company_name'] = df['company_name'].fillna('N/A')
         return df
     except Exception as e:
         st.error(f"查询数据库时出错: {e}")
@@ -104,31 +102,33 @@ with st.sidebar:
 df = st.session_state.df_results
 if not df.empty:
     st.success(f"查询到 {len(df)} 条结果！")
+    st.info("提示：为保证应用性能，概览最多显示最近的1000条公告。")
     
     st.subheader("公告概览 (按日期 -> 公司分组)")
     list_container = st.container(height=400)
     
-    # --- 【核心修复】确保日期列是 datetime 类型 ---
+    # --- 【核心改进】数据清洗与嵌套分组 ---
+    # 1. 确保日期列是 datetime 类型
     df['announcement_date'] = pd.to_datetime(df['announcement_date'], errors='coerce')
     df.dropna(subset=['announcement_date'], inplace=True)
 
-    # 先按日期分组
+    # 2. 清洗公司名称数据
+    df['company_name'] = df['company_name'].fillna('N/A').astype(str).str.strip()
+
+    # 3. 开始分组
     df['ann_date_only'] = df['announcement_date'].dt.date
     grouped_by_date = df.sort_values('ann_date_only', ascending=False).groupby('ann_date_only', sort=False)
 
     with list_container:
-        # 遍历每个日期组
         for ann_date, date_group in grouped_by_date:
-            # 为日期创建第一级折叠
-            date_expander_title = f"**{ann_date.strftime('%Y-%m-%d')}** ({len(date_group)}条公告)"
+            num_companies = date_group['company_name'].nunique()
+            date_expander_title = f"**{ann_date.strftime('%Y-%m-%d')}** ({num_companies}家公司, {len(date_group)}条公告)"
+            
             with st.expander(date_expander_title):
-                # 在日期组内，再按公司名分组
                 grouped_by_company = date_group.groupby('company_name')
                 for company_name, company_group in grouped_by_company:
-                    # 为公司创建第二级折叠
                     company_expander_title = f"{company_name} ({len(company_group)}条公告)"
                     with st.expander(company_expander_title):
-                        # 列出该公司当日的所有公告
                         for _, row in company_group.iterrows():
                             if st.button(f"{row['announcement_title']}", key=f"btn_{row['id']}", use_container_width=True):
                                 st.session_state.selected_announcement_id = row['id']
