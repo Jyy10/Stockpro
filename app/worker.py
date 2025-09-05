@@ -1,12 +1,12 @@
-# worker.py (v4.2 - Precise Filtering & Daily Processing)
+# worker.py (v4.4 - AI Enrichment)
 import os
 import psycopg2
 import pandas as pd
 from datetime import date, timedelta
 import time
 import akshare as ak
-# 确保 data_handler.py 在同一目录下或在Python路径中
 import data_handler as dh
+import asyncio
 
 def connect_db():
     """连接到数据库"""
@@ -25,11 +25,9 @@ def connect_db():
 
 def setup_database(conn):
     """确保数据库表结构正确"""
-    # 此处逻辑与 backfill_worker 一致
     print("--- 正在检查并修复数据库表结构... ---")
     try:
         with conn.cursor() as cursor:
-            # 检查并添加新列（如果不存在）
             columns_to_add = {
                 "transaction_type": "VARCHAR(50)", "acquirer": "TEXT",
                 "target": "TEXT", "summary": "TEXT", "transaction_price": "TEXT"
@@ -60,13 +58,12 @@ def setup_database(conn):
         conn.rollback()
         return False
 
-def enrichment_stage(conn):
-    """第二阶段：智能增补"""
-    # 此处逻辑与 backfill_worker 一致
+async def enrichment_stage(conn):
+    """第二阶段：智能增补（异步）"""
     print("\n--- 阶段2: 开始智能增补公告详情 ---")
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, pdf_link FROM announcements WHERE summary IS NULL OR summary = '未能从PDF中提取有效信息。' LIMIT 50;") # 每日更新处理50条
+            cursor.execute("SELECT id, pdf_link FROM announcements WHERE summary IS NULL OR summary = '未能从PDF中提取有效信息。' LIMIT 50;")
             records_to_enrich = cursor.fetchall()
 
             if not records_to_enrich:
@@ -81,7 +78,8 @@ def enrichment_stage(conn):
                     cursor.execute(update_query, ("无PDF链接，无法解析。", record_id))
                     continue
 
-                trans_type, acquirer, target, price, summary = dh.extract_details_from_pdf(pdf_link)
+                print(f"  - 正在通过AI解析公告 ID: {record_id}...")
+                trans_type, acquirer, target, price, summary = await dh.extract_details_from_pdf(pdf_link)
                 
                 update_query = """
                 UPDATE announcements 
@@ -89,7 +87,7 @@ def enrichment_stage(conn):
                 WHERE id = %s;
                 """
                 cursor.execute(update_query, (trans_type, acquirer, target, price, summary, record_id))
-                time.sleep(1)
+                await asyncio.sleep(1)
         
         conn.commit()
     except Exception as e:
@@ -98,7 +96,7 @@ def enrichment_stage(conn):
 
 def main():
     print("="*40)
-    print(f"每日更新 Worker (v4.2) 开始运行...")
+    print(f"每日更新 Worker (v4.4 - AI) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
@@ -107,11 +105,9 @@ def main():
         if conn: conn.close()
         return
 
-    # --- 精准关键词定义 ---
     core_keywords = ["重组", "购买资产", "资产出售"]
     modifier_keywords = ["草案", "预案", "进展公告"]
 
-    # 只处理昨天和今天
     end_date = date.today()
     start_date = end_date - timedelta(days=1)
     date_list = [start_date, end_date]
@@ -121,7 +117,7 @@ def main():
     
     for single_date in reversed(date_list):
         print(f"\n{'='*20} 正在处理日期: {single_date.strftime('%Y-%m-%d')} {'='*20}")
-        daily_df = dh.scrape_akshare_precisely(core_keywords, modifier_keywords, single_date, single_date)
+        daily_df = dh.scrape_and_normalize_akshare(core_keywords, modifier_keywords, single_date, single_date)
 
         if daily_df.empty:
             print("  - 当日未找到相关公告。")
@@ -130,6 +126,11 @@ def main():
         daily_inserts = 0
         with conn.cursor() as cursor:
             for _, row in daily_df.iterrows():
+                stock_code = row.get('股票代码')
+                if not stock_code or stock_code == 'N/A' or not isinstance(stock_code, str) or not stock_code.isdigit():
+                    print(f"    - \033[93m跳过\033[0m: 无效或缺失股票代码。标题: {row.get('公告标题')[:30]}...")
+                    continue
+                
                 try:
                     insert_query = """
                     INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
@@ -137,7 +138,7 @@ def main():
                     ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
                     """
                     record = (
-                        row.get('公告日期'), row.get('股票代码', 'N/A'),
+                        row.get('公告日期'), stock_code,
                         row.get('公司名称', 'N/A'), row.get('公告标题'),
                         row.get('PDF链接', 'N/A')
                     )
@@ -155,7 +156,7 @@ def main():
 
     print(f"\n阶段1完成：总共新录入了 {total_new_inserts} 条基础公告。")
 
-    enrichment_stage(conn)
+    asyncio.run(enrichment_stage(conn))
 
     conn.close()
     print("\n" + "="*40)
@@ -164,3 +165,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
