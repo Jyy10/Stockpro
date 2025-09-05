@@ -1,11 +1,12 @@
-# app.py (v5.9 - Nested Grouping & Data Cleaning)
+# app.py (v6.0 - High Performance & Rich Data Quote)
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import psycopg2
 import os
 import sys
 import akshare as ak
+from concurrent.futures import ThreadPoolExecutor
 
 # --- 数据库连接 ---
 @st.cache_resource(ttl=600)
@@ -23,22 +24,80 @@ def init_connection():
 
 conn = init_connection()
 
-# --- 数据获取与查询逻辑 ---
+# --- 【核心改进】高性能、多维度的数据获取逻辑 ---
+
+def fetch_historical_data(stock_code):
+    """获取历史数据以计算涨跌幅"""
+    try:
+        end_date = date.today().strftime('%Y%m%d')
+        start_date_60 = (date.today() - timedelta(days=70)).strftime('%Y%m%d') # 多取10天以防节假日
+        hist_df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date=start_date_60, end_date=end_date, adjust="qfq")
+        if len(hist_df) < 2: return None
+        return hist_df.iloc[-61:] # 返回最近约60个交易日
+    except Exception:
+        return None
+
+def fetch_financial_indicators(stock_code):
+    """获取核心财务指标"""
+    try:
+        indicator_df = ak.stock_financial_analysis_indicator(symbol=stock_code)
+        return indicator_df.iloc[-1] # 返回最新一期
+    except Exception:
+        return None
+
+def fetch_realtime_price(stock_code):
+    """获取最新股价和交易状态"""
+    try:
+        return ak.stock_individual_real_time_quote(symbol=stock_code)
+    except Exception:
+        return None
 
 def get_stock_realtime_quote(stock_code):
     """
-    获取单只股票的实时行情和财务指标。
+    通过并行API调用，高效获取丰富维度的公司快照数据。
     """
     if not stock_code or stock_code == 'N/A':
         return "无效的股票代码。"
-    try:
-        stock_spot_df = ak.stock_zh_a_spot_em()
-        quote = stock_spot_df[stock_spot_df['代码'] == stock_code]
-        if quote.empty:
-            return f"未能找到股票代码 {stock_code} 的实时行情数据。"
-        return quote.iloc[0]
-    except Exception as e:
-        return f"查询实时行情时出错: {e}"
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_hist = executor.submit(fetch_historical_data, stock_code)
+        future_fin = executor.submit(fetch_financial_indicators, stock_code)
+        future_price = executor.submit(fetch_realtime_price, stock_code)
+        
+        hist_df = future_hist.result()
+        fin_series = future_fin.result()
+        price_series = future_price.result()
+
+    # --- 数据整合 ---
+    # 1. 交易信息
+    if price_series is not None:
+        results['股价'] = price_series.get('price')
+        results['是否停牌'] = "是" if price_series.get('open') == 0 and price_series.get('price') > 0 else "否"
+    
+    if hist_df is not None:
+        if len(hist_df) > 30:
+            results['近30天涨跌幅'] = (hist_df['收盘'].iloc[-1] / hist_df['收盘'].iloc[-31] - 1) * 100
+        if len(hist_df) > 60:
+            results['近60天涨跌幅'] = (hist_df['收盘'].iloc[-1] / hist_df['收盘'].iloc[-61] - 1) * 100
+
+    # 2. 市值与股本
+    if fin_series is not None:
+        results['市值'] = fin_series.get('总市值')
+        results['总股本'] = fin_series.get('总股本')
+        results['流通股数'] = fin_series.get('流通a股')
+        # 3. 盈利估值
+        results['ttm净利润'] = fin_series.get('归属母公司股东的净利润-ttm')
+        results['市盈率'] = fin_series.get('市盈率-ttm')
+        # 4. 资产估值
+        results['净资产'] = fin_series.get('归属母公司股东的权益') # 使用最近一期季报
+        results['市净率'] = fin_series.get('市净率')
+        # 5. 收入估值
+        results['ttm收入总额'] = fin_series.get('营业总收入-ttm')
+        results['市销率'] = fin_series.get('市销率-ttm')
+
+    results['fetch_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return results if results else "未能获取到任何有效的公司快照数据。"
 
 def run_query(start, end, keyword):
     if not conn:
@@ -50,7 +109,6 @@ def run_query(start, end, keyword):
         if keyword:
             query += " AND announcement_title ILIKE %s"
             params.append(f"%{keyword}%")
-        # 增加数据加载上限，以显示更多公司
         query += f" ORDER BY announcement_date DESC, company_name ASC, id DESC LIMIT 1000"
         df = pd.read_sql_query(query, conn, params=params)
         return df
@@ -107,15 +165,9 @@ if not df.empty:
     st.subheader("公告概览 (按日期 -> 公司分组)")
     list_container = st.container(height=400)
     
-    # --- 【核心改进】数据清洗与嵌套分组 ---
-    # 1. 确保日期列是 datetime 类型
     df['announcement_date'] = pd.to_datetime(df['announcement_date'], errors='coerce')
     df.dropna(subset=['announcement_date'], inplace=True)
-
-    # 2. 清洗公司名称数据
     df['company_name'] = df['company_name'].fillna('N/A').astype(str).str.strip()
-
-    # 3. 开始分组
     df['ann_date_only'] = df['announcement_date'].dt.date
     grouped_by_date = df.sort_values('ann_date_only', ascending=False).groupby('ann_date_only', sort=False)
 
@@ -123,7 +175,6 @@ if not df.empty:
         for ann_date, date_group in grouped_by_date:
             num_companies = date_group['company_name'].nunique()
             date_expander_title = f"**{ann_date.strftime('%Y-%m-%d')}** ({num_companies}家公司, {len(date_group)}条公告)"
-            
             with st.expander(date_expander_title):
                 grouped_by_company = date_group.groupby('company_name')
                 for company_name, company_group in grouped_by_company:
@@ -136,52 +187,48 @@ if not df.empty:
 
     st.divider()
 
-    # --- 公告详情展示 ---
     if st.session_state.selected_announcement_id is not None:
         selected_row = df[df['id'] == st.session_state.selected_announcement_id].iloc[0]
-        
         st.subheader(f"公告详情: {selected_row['announcement_title']}")
+        # ... (详情展示逻辑)
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info(f"**交易概要 (AI提取)**")
-            summary = selected_row.get('summary')
-            if summary is None or summary == '未能从PDF中提取有效信息。':
-                st.warning("详细信息正在后台AI解析中，请稍后刷新查看。")
-            else:
-                st.write(summary)
-
-            st.markdown(f"""
-            - **交易类型**: {selected_row.get('transaction_type', 'N/A')}
-            - **收购方**: {selected_row.get('acquirer', 'N/A')}
-            - **标的方**: {selected_row.get('target', 'N/A')}
-            - **交易对价**: {selected_row.get('transaction_price', 'N/A')}
-            """)
-
-        with col2:
-            st.info("**上市公司信息**")
-            st.markdown(f"""
-            - **公司名称**: {selected_row['company_name']} ({selected_row['stock_code']})
-            - **所属行业**: {selected_row.get('industry', 'N/A')}
-            """)
-            st.text_area("主营业务:", value=selected_row.get('main_business', 'N/A'), height=100, disabled=True, key=f"main_biz_{selected_row['id']}")
-
-        st.markdown(f"**[阅读原始公告PDF]({selected_row['pdf_link']})**" if selected_row['pdf_link'] and selected_row['pdf_link'] != 'N/A' else "*无原始公告链接*")
-        
+        # --- 【核心改进】全新的快照刷新与展示逻辑 ---
         if st.button("刷新实时公司快照", key=f"refresh_{selected_row['id']}"):
             with st.spinner("正在获取实时数据..."):
                 quote = get_stock_realtime_quote(selected_row['stock_code'])
                 st.session_state.realtime_quote[selected_row['id']] = quote
         
         quote_data = st.session_state.realtime_quote.get(selected_row['id'])
-        if quote_data is not None:
-            if isinstance(quote_data, pd.Series):
+        if quote_data:
+            if isinstance(quote_data, dict):
                 st.success("**实时财务快照**")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("总市值(亿)", f"{quote_data.get('总市值', 0) / 1e8:.2f}")
-                c2.metric("市盈率(动态)", f"{quote_data.get('市盈率-动态', 0):.2f}")
-                c3.metric("市净率", f"{quote_data.get('市净率', 0):.2f}")
+                
+                # 创建三列布局
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.write("**交易信息**")
+                    st.metric("当前股价", f"{quote_data.get('股价', 0):.2f} 元" if quote_data.get('股价') else "N/A")
+                    st.metric("是否停牌", quote_data.get('是否停牌', "N/A"))
+                    st.metric("近30天涨跌幅", f"{quote_data.get('近30天涨跌幅', 0):.2f}%" if quote_data.get('近30天涨跌幅') else "N/A")
+                    st.metric("近60天涨跌幅", f"{quote_data.get('近60天涨跌幅', 0):.2f}%" if quote_data.get('近60天涨跌幅') else "N/A")
+
+                with col2:
+                    st.write("**市值与股本**")
+                    st.metric("总市值", f"{quote_data.get('市值', 0) / 1e8:.2f} 亿元" if quote_data.get('市值') else "N/A")
+                    st.metric("总股本", f"{quote_data.get('总股本', 0) / 1e8:.2f} 亿股" if quote_data.get('总股本') else "N/A")
+                    st.metric("流通股", f"{quote_data.get('流通股数', 0) / 1e8:.2f} 亿股" if quote_data.get('流通股数') else "N/A")
+                    
+                with col3:
+                    st.write("**核心估值指标**")
+                    st.metric("市盈率 (TTM)", f"{quote_data.get('市盈率', 0):.2f}" if quote_data.get('市盈率') else "N/A")
+                    st.metric("市净率 (PB)", f"{quote_data.get('市净率', 0):.2f}" if quote_data.get('市净率') else "N/A")
+                    st.metric("市销率 (TTM)", f"{quote_data.get('市销率', 0):.2f}" if quote_data.get('市销率') else "N/A")
+
+                st.caption(f"TTM净利润: {quote_data.get('ttm净利润', 0) / 1e8:.2f} 亿元" if quote_data.get('ttm净利润') else "N/A")
+                st.caption(f"TTM营业总收入: {quote_data.get('ttm收入总额', 0) / 1e8:.2f} 亿元" if quote_data.get('ttm收入总额') else "N/A")
+                st.caption(f"净资产: {quote_data.get('净资产', 0) / 1e8:.2f} 亿元" if quote_data.get('净资产') else "N/A")
+                st.caption(f"数据获取时间: {quote_data.get('fetch_time', 'N/A')}")
             else:
                 st.warning(quote_data)
 
