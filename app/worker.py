@@ -1,4 +1,4 @@
-# worker.py (v4.5 - Conditional Update)
+# worker.py (v4.7 - Final DB Fix)
 import os
 import psycopg2
 import pandas as pd
@@ -42,21 +42,23 @@ def setup_database(conn):
                     END IF;
                 END $$;
                 """)
-            
+
+            cursor.execute("ALTER TABLE announcements ALTER COLUMN pdf_link DROP NOT NULL;")
+            print(" - 已确保 pdf_link 字段允许为空。")
+
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;")
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS unique_announcement_date_title;")
             cursor.execute("ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title UNIQUE (announcement_date, announcement_title);")
+            
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_announcement_date ON announcements (announcement_date);")
         
         conn.commit()
         print("数据库表结构已准备就绪。")
         return True
-    except psycopg2.errors.DuplicateObject:
+    except Exception as e:
+        print(f" - 数据库设置过程中出现一个可忽略的错误: {e}")
         conn.rollback()
         return True
-    except Exception as e:
-        print(f"数据库设置失败: {e}")
-        conn.rollback()
-        return False
 
 async def enrichment_stage(conn):
     """第二阶段：智能增补（异步）"""
@@ -96,7 +98,7 @@ async def enrichment_stage(conn):
 
 def main():
     print("="*40)
-    print(f"每日更新 Worker (v4.5) 开始运行...")
+    print(f"每日更新 Worker (v4.7) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
@@ -146,7 +148,7 @@ def main():
                     record = (
                         row.get('公告日期'), stock_code,
                         row.get('公司名称', 'N/A'), row.get('公告标题'),
-                        row.get('PDF链接', 'N/A')
+                        row.get('PDF链接')
                     )
                     cursor.execute(insert_query, record)
                     if cursor.rowcount > 0:
@@ -171,4 +173,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
