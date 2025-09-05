@@ -1,4 +1,4 @@
-# backfill_worker.py (v3.6 - Final DB Fix)
+# backfill_worker.py (v3.7 - with Enrichment Stage)
 import os
 import psycopg2
 import psycopg2.errors
@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import date, timedelta
 import time
 import akshare as ak
-import data_handler as dh # 确保 data_handler.py 在同一目录下
+import data_handler as dh
 
 def connect_db():
     """连接到数据库"""
@@ -24,51 +24,27 @@ def connect_db():
         return None
 
 def setup_database(conn):
-    """确保数据库表结构正确，管理 UNIQUE 约束"""
+    """确保数据库表结构正确"""
     print("--- 正在检查并修复数据表结构... ---")
     try:
         with conn.cursor() as cursor:
-            # 步骤1: 确保表存在
-            create_table_query = """
+            # 确保表存在
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS announcements (
-                id SERIAL PRIMARY KEY,
-                announcement_date DATE NOT NULL,
-                stock_code VARCHAR(10),
-                company_name VARCHAR(255),
-                announcement_title TEXT NOT NULL,
-                pdf_link TEXT,
-                target_company TEXT,
-                transaction_price TEXT,
-                shareholders TEXT,
-                industry TEXT,
-                main_business TEXT
-            );
-            """
-            cursor.execute(create_table_query)
-            
-            # 步骤2: (关键修复) 移除可能存在的、有问题的 pdf_link 唯一约束
-            drop_pdf_link_constraint_query = """
-            ALTER TABLE announcements
-            DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;
-            """
-            cursor.execute(drop_pdf_link_constraint_query)
-            print("已移除旧的 pdf_link 约束（如果存在）。")
-
-            # 步骤3: 确保我们需要的、正确的 UNIQUE 约束存在
-            add_correct_constraint_query = """
-            ALTER TABLE announcements
-            ADD CONSTRAINT unique_announcement_date_title
-            UNIQUE (announcement_date, announcement_title);
-            """
+                id SERIAL PRIMARY KEY, announcement_date DATE NOT NULL, stock_code VARCHAR(10),
+                company_name VARCHAR(255), announcement_title TEXT NOT NULL, pdf_link TEXT,
+                target_company TEXT, transaction_price TEXT, shareholders TEXT,
+                industry TEXT, main_business TEXT
+            );""")
+            # 移除旧约束
+            cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;")
+            # 添加新约束
             try:
-                cursor.execute(add_correct_constraint_query)
-                print("成功为数据表应用正确的 UNIQUE 约束。")
+                cursor.execute("""
+                ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title
+                UNIQUE (announcement_date, announcement_title);""")
             except (psycopg2.errors.DuplicateObject, psycopg2.errors.DuplicateTable):
-                # (关键修复) 捕获更广泛的“已存在”错误，包括 "relation already exists"
-                # 这个错误意味着约束已经存在，是正常情况
-                print("正确的 UNIQUE 约束已存在，无需更改。")
-                conn.rollback() # 回滚失败的 ALTER TABLE 事务
-            
+                conn.rollback() # 约束已存在，正常
         conn.commit()
         print("数据表 'announcements' 已准备就绪。")
         return True
@@ -77,88 +53,118 @@ def setup_database(conn):
         conn.rollback()
         return False
 
-def main():
-    print("="*40)
-    print(f"历史数据回补 Worker 开始运行...")
-    print(f"正在使用 akshare 版本: {ak.__version__}")
-    print("="*40)
-
-    conn = connect_db()
-    if not conn or not setup_database(conn):
-        print("因数据库准备失败，Worker 提前终止。")
-        if conn: conn.close()
-        return
-
-    # --- 准备日期范围和关键词 (已根据您的要求精简) ---
+def fast_forward_stage(conn):
+    """阶段一：快速抓取并录入所有匹配公告的基本信息"""
+    print("\n" + "="*20 + " 阶段一：快速录入基本信息 " + "="*20)
     end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=270)
-    keywords = [
-        "重组", "购买资产", "草案", "预案"
-    ]
+    keywords = ["重组", "购买资产"]
     
     date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
     total_days = len(date_list)
-    total_successful_inserts = 0
-    total_failed_inserts = 0
+    total_new_inserts = 0
 
-    print(f"\n--- 准备处理从 {start_date} 到 {end_date} 共 {total_days} 天的数据 ---")
-    print(f"--- 使用关键词: {keywords} ---")
+    print(f"--- 准备处理从 {start_date} 到 {end_date} 共 {total_days} 天的数据 ---")
 
-    # --- 每日循环处理 ---
     for i, single_date in enumerate(reversed(date_list)):
-        print("\n" + "="*20 + f" 正在处理日期: {single_date} ({i+1}/{total_days}) " + "="*20)
+        print(f"\n--- 正在处理日期: {single_date} ({i+1}/{total_days}) ---")
+        daily_df = dh.scrape_akshare(keywords, single_date, single_date)
 
-        daily_announcements_df = dh.scrape_akshare(keywords, single_date, single_date)
-
-        if daily_announcements_df.empty:
-            print(f"  - 在 {single_date} 未找到或匹配到任何相关公告。")
+        if daily_df.empty:
+            print(f"  - 当日未找到相关公告。")
             continue
 
-        print(f"  - 匹配到 {len(daily_announcements_df)} 条公告，准备入库...")
-        
-        successful_inserts_today = 0
+        print(f"  - 匹配到 {len(daily_df)} 条公告，准备入库...")
+        inserts_today = 0
         with conn.cursor() as cursor:
-            for index, row in daily_announcements_df.iterrows():
-                row_data = row.to_dict()
+            for _, row in daily_df.iterrows():
                 try:
-                    insert_query = """
+                    cursor.execute("""
                     INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
-                    """
-                    record_to_insert = (
-                        row_data.get('公告日期'),
-                        row_data.get('股票代码', 'N/A'),
-                        row_data.get('公司名称', 'N/A'),
-                        row_data.get('公告标题'),
-                        row_data.get('PDF链接', 'N/A')
-                    )
-                    cursor.execute(insert_query, record_to_insert)
+                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
+                    """, (row.get('公告日期'), row.get('股票代码', 'N/A'), row.get('公司名称', 'N/A'),
+                          row.get('公告标题'), row.get('PDF链接', 'N/A')))
                     if cursor.rowcount > 0:
-                        successful_inserts_today += 1
+                        inserts_today += 1
                 except Exception as e:
-                    print(f"    ! 插入 '{row_data.get('公告标题')}' 时发生意外错误: {e}")
-                    total_failed_inserts += 1
+                    print(f"    ! 插入 '{row.get('公告标题')}' 时出错: {e}")
                     conn.rollback()
         
-        if successful_inserts_today > 0:
-            print(f"  - 当日新插入 {successful_inserts_today} 条记录。正在提交...")
+        if inserts_today > 0:
             conn.commit()
-            total_successful_inserts += successful_inserts_today
-        else:
-            print("  - 当日无新记录入库（可能均已存在）。")
+            total_new_inserts += inserts_today
+            print(f"  - 当日新插入 {inserts_today} 条记录。")
+    
+    print(f"\n--- 阶段一完成：共新录入 {total_new_inserts} 条公告基本信息 ---")
+
+def enrichment_stage(conn):
+    """阶段二：慢速增补，读取PDF并更新数据库中的详细信息"""
+    print("\n" + "="*20 + " 阶段二：慢速增补PDF详情 " + "="*20)
+    
+    records_to_process = []
+    with conn.cursor() as cursor:
+        # 查找需要被增补的记录：有PDF链接，但target_company字段为空
+        cursor.execute("""
+        SELECT id, pdf_link, stock_code FROM announcements 
+        WHERE pdf_link IS NOT NULL AND pdf_link != 'N/A' AND target_company IS NULL
+        ORDER BY announcement_date DESC;
+        """)
+        records_to_process = cursor.fetchall()
+
+    if not records_to_process:
+        print("--- 无需增补的数据，或所有数据均已增补完毕。---")
+        return
+
+    print(f"--- 发现 {len(records_to_process)} 条记录需要从PDF增补信息 ---")
+    updated_count = 0
+    
+    for i, (record_id, pdf_link, stock_code) in enumerate(records_to_process):
+        print(f"\n--- 正在处理第 {i+1}/{len(records_to_process)} 条记录 (ID: {record_id}) ---")
+        try:
+            # 1. 从PDF提取信息
+            print(f"  - 正在读取PDF: {pdf_link[:50]}...")
+            pdf_details = dh.extract_details_from_pdf(pdf_link)
             
-        time.sleep(1)
+            # 2. 获取公司档案
+            print(f"  - 正在获取 {stock_code} 的公司档案...")
+            profiles = dh.get_company_profiles([stock_code])
+            profile = profiles.get(stock_code, {})
 
-    conn.close()
+            # 3. 更新数据库
+            print("  - 正在更新数据库...")
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                UPDATE announcements SET 
+                    target_company = %s, transaction_price = %s, shareholders = %s,
+                    industry = %s, main_business = %s
+                WHERE id = %s;
+                """, (pdf_details.get('target_company'), pdf_details.get('transaction_price'),
+                      pdf_details.get('shareholders'), profile.get('industry'),
+                      profile.get('main_business'), record_id))
+            conn.commit()
+            updated_count += 1
+            print("  - 更新成功！")
+            time.sleep(1) # 尊重接口，稍作等待
 
-    # --- 最终总结 ---
-    print("\n" + "="*40)
-    print("--- 最终入库总结 ---")
-    print(f"在 {total_days} 天的处理中，共新插入: {total_successful_inserts} 条记录。")
-    print(f"因插入失败而跳过: {total_failed_inserts} 条记录。")
-    print("="*40)
-    print("历史数据回补 Worker 运行完毕。")
+        except Exception as e:
+            print(f"  ! 处理记录 {record_id} 时发生错误: {e}")
+            conn.rollback()
+
+    print(f"\n--- 阶段二完成：成功增补了 {updated_count} 条记录的详细信息 ---")
+
+def main():
+    print("="*40 + "\n历史数据回补 Worker (两阶段模式) 开始运行...\n" + "="*40)
+    conn = connect_db()
+    if not conn or not setup_database(conn):
+        if conn: conn.close()
+        return
+
+    try:
+        fast_forward_stage(conn) # 阶段一
+        enrichment_stage(conn)   # 阶段二
+    finally:
+        conn.close()
+        print("\n" + "="*40 + "\n历史数据回补 Worker 运行完毕。\n" + "="*40)
 
 if __name__ == "__main__":
     main()
