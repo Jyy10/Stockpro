@@ -1,4 +1,4 @@
-# backfill_worker.py (v4.5 - Conditional Update)
+# backfill_worker.py (v4.6 - Database Indexing)
 import os
 import psycopg2
 import pandas as pd
@@ -24,16 +24,40 @@ def connect_db():
         return None
 
 def setup_database(conn):
-    """确保数据库表结构正确，包含所有需要的字段和约束"""
+    """确保数据库表结构正确，包含所有需要的字段和约束"""a
+import time
+import akshare as ak
+import data_handler as dh
+import asyncio
+
+def connect_db():
+   # 检查并添加新列（如果不存在）
+             """连接到数据库"""
+    print("--- 正在尝试连接数据库... ---")
+    try:
+        conn = psycopg2.connect(
+            host=os.environ.get("DB_HOST"), port=os.environ.get("DB_PORT"),
+            dbname=os.environ.get("DB_NAME"), user=os.environ.get("DB_USER"),
+            password=os.environ.get("DB_PASSWORD"), sslmode='require'
+        )
+        print("数据库连接成功！")
+        return conn
+    except Exception as e:
+        print(f"数据库连接失败，底层错误: {e}")
+        return None
+
+def setup_database(conn):
+    """确保数据库表结构正确"""
     print("--- 正在检查并修复数据库表结构... ---")
     try:
         with conn.cursor() as cursor:
-            # 检查并添加新列（如果不存在）
             columns_to_add = {
                 "transaction_type": "VARCHAR(50)", "acquirer": "TEXT",
                 "target": "TEXT", "summary": "TEXT", "transaction_price": "TEXT"
             }
-            for col, col_type in columns_to_add.items():
+ print(" - 已移除陈旧的 pdf_link 约束 (如果存在)。")
+
+                       for col, col_type in columns_to_add.items():
                 cursor.execute(f"""
                 DO $$
                 BEGIN
@@ -45,17 +69,13 @@ def setup_database(conn):
                 """)
             
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;")
-            print(" - 已移除陈旧的 pdf_link 约束 (如果存在)。")
-
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS unique_announcement_date_title;")
             cursor.execute("ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title UNIQUE (announcement_date, announcement_title);")
-            print(" - 已确保正确的唯一性约束 (date, title) 已设置。")
         
         conn.commit()
         print("数据库表结构已准备就绪。")
         return True
     except psycopg2.errors.DuplicateObject:
-        print(" - 唯一性约束已存在，无需重复添加。")
         conn.rollback()
         return True
     except Exception as e:
@@ -64,12 +84,11 @@ def setup_database(conn):
         return False
 
 async def enrichment_stage(conn):
-    """第二阶段：对数据库中缺少详细信息的公告进行智能增补（异步）"""
+    """第二阶段：智能增补（异步）"""
     print("\n--- 阶段2: 开始智能增补公告详情 ---")
     try:
-        # 使用psycopg2的异步游标
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, pdf_link FROM announcements WHERE summary IS NULL OR summary = '未能从PDF中提取有效信息。' LIMIT 100;")
+            cursor.execute("SELECT id, pdf_link FROM announcements WHERE summary IS NULL OR summary = '未能从PDF中提取有效信息。' LIMIT 50;")
             records_to_enrich = cursor.fetchall()
 
             if not records_to_enrich:
@@ -85,7 +104,6 @@ async def enrichment_stage(conn):
                     continue
 
                 print(f"  - 正在通过AI解析公告 ID: {record_id}...")
-                # 调用异步的AI解析函数
                 trans_type, acquirer, target, price, summary = await dh.extract_details_from_pdf(pdf_link)
                 
                 update_query = """
@@ -94,50 +112,43 @@ async def enrichment_stage(conn):
                 WHERE id = %s;
                 """
                 cursor.execute(update_query, (trans_type, acquirer, target, price, summary, record_id))
-                await asyncio.sleep(1) # 异步等待，避免请求过于频繁
+                await asyncio.sleep(1)
         
         conn.commit()
-        print(f"阶段2完成：成功增补了 {len(records_to_enrich)} 条公告的信息。")
-
     except Exception as e:
         print(f"  ! 在增补阶段发生严重错误: {e}")
         conn.rollback()
 
 def main():
     print("="*40)
-    print(f"历史数据回补 Worker (v4.5) 开始运行...")
+    print(f"每日更新 Worker (v4.5) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
     conn = connect_db()
     if not conn or not setup_database(conn):
-        print("因数据库准备失败，Worker 提前终止。")
         if conn: conn.close()
         return
 
     core_keywords = ["重组", "购买资产", "资产出售"]
     modifier_keywords = ["草案", "预案", "进展公告"]
 
-    end_date = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=270)
-    date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
+    end_date = date.today()
+    start_date = end_date - timedelta(days=1)
+    date_list = [start_date, end_date]
 
     print("\n--- 阶段1: 开始按天快速录入基础公告 ---")
     total_new_inserts = 0
-    total_updates = 0
     
     for single_date in reversed(date_list):
         print(f"\n{'='*20} 正在处理日期: {single_date.strftime('%Y-%m-%d')} {'='*20}")
-        
         daily_df = dh.scrape_and_normalize_akshare(core_keywords, modifier_keywords, single_date, single_date)
 
         if daily_df.empty:
             print("  - 当日未找到相关公告。")
             continue
 
-        print(f"  - 找到 {len(daily_df)} 条匹配记录，准备入库...")
         daily_inserts = 0
-        daily_updates = 0
         with conn.cursor() as cursor:
             for _, row in daily_df.iterrows():
                 stock_code = row.get('股票代码')
@@ -146,7 +157,6 @@ def main():
                     continue
                 
                 try:
-                    # --- 【核心改进】智能UPSERT逻辑 ---
                     insert_query = """
                     INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
                     VALUES (%s, %s, %s, %s, %s)
@@ -164,10 +174,8 @@ def main():
                         row.get('PDF链接', 'N/A')
                     )
                     cursor.execute(insert_query, record)
-                    # cursor.rowcount: 1 for INSERT, 2 for UPDATE (in some drivers), 0 for DO NOTHING
                     if cursor.rowcount > 0:
-                        # 这是一个简化的判断，实际可能是新增或更新
-                        daily_inserts += 1 # 统一计为处理成功
+                        daily_inserts += 1
                 except Exception as e:
                     print(f"    ! 插入/更新时出错: {e}")
                     conn.rollback()
@@ -179,14 +187,12 @@ def main():
 
     print(f"\n阶段1完成：总共处理了 {total_new_inserts} 条基础公告。")
 
-    # 运行异步的增补阶段
     asyncio.run(enrichment_stage(conn))
 
     conn.close()
     print("\n" + "="*40)
-    print("历史数据回补 Worker 运行完毕。")
+    print("每日更新 Worker 运行完毕。")
     print("="*40)
 
 if __name__ == "__main__":
     main()
-    
