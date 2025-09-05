@@ -1,4 +1,4 @@
-# app.py (v5.1 - Real-time Data Refresh)
+# app.py (v5.2 - Decoupled Architecture)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -7,13 +7,14 @@ import os
 import sys
 
 # --- 动态路径设置 ---
-# 确保应用在任何环境下都能找到 data_handler 模块
+# 确保应用在任何环境下都能找到其数据获取模块
 try:
+    # 导入专为前端设计的、轻量级的数据获取模块
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    import data_handler as dh
-    DATA_HANDLER_LOADED = True
+    import frontend_data_fetcher as fdf
+    FETCHER_LOADED = True
 except (ImportError, ModuleNotFoundError):
-    DATA_HANDLER_LOADED = False
+    FETCHER_LOADED = False
 
 # --- 数据库连接 ---
 @st.cache_resource(ttl=600)
@@ -51,11 +52,11 @@ with st.sidebar:
     else:
         st.warning("数据库未连接")
 
-    if not DATA_HANDLER_LOADED:
+    if not FETCHER_LOADED:
         st.warning(
             """
-            **无法加载后台数据模块 (data_handler)。** 实时公司快照刷新功能将不可用。
-            **解决方案**: 请检查应用的依赖项配置 (如 requirements.txt)，确保已包含 PyPDF2 和 akshare 库。
+            **无法加载数据获取模块。** 实时公司快照刷新功能将不可用。
+            **解决方案**: 请检查应用的依赖项配置 (如 requirements.txt)，确保已包含 akshare 库。
             """
         )
     
@@ -116,7 +117,7 @@ if not df.empty:
         for index, row in df.iterrows():
             if st.button(f"**{row['announcement_date'].strftime('%Y-%m-%d')}** | {row['company_name']} | {row['announcement_title']}", key=f"btn_{row['id']}", use_container_width=True):
                 st.session_state.selected_announcement_id = row['id']
-                st.session_state.realtime_quote.pop(row['id'], None) # 切换选择时清除旧的快照数据
+                st.session_state.realtime_quote.pop(row['id'], None)
     
     st.divider()
 
@@ -147,13 +148,13 @@ if not df.empty:
 
         st.markdown(f"**[阅读原始公告PDF]({selected_row['pdf_link']})**" if selected_row['pdf_link'] and selected_row['pdf_link'] != 'N/A' else "*无原始公告链接*")
         
-        if DATA_HANDLER_LOADED:
+        if FETCHER_LOADED:
             if st.button("刷新实时公司快照", key=f"refresh_{selected_row['id']}"):
                 with st.spinner("正在获取实时数据..."):
-                    quote = dh.get_stock_realtime_quote(selected_row['stock_code'])
+                    # 调用新的、轻量级的获取函数
+                    quote = fdf.get_stock_realtime_quote(selected_row['stock_code'])
                     st.session_state.realtime_quote[selected_row['id']] = quote
             
-            # 展示实时快照数据
             quote_data = st.session_state.realtime_quote.get(selected_row['id'])
             if quote_data:
                 if isinstance(quote_data, pd.Series):
