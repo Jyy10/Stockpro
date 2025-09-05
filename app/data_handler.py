@@ -1,9 +1,10 @@
-# data_handler.py (v5.0 - AI-Powered Parsing)
+# data_handler.py (v5.2 - AI Diagnostics)
 import requests
 import pandas as pd
 import akshare as ak
 import re
 import json
+import os
 from io import BytesIO
 from PyPDF2 import PdfReader
 import time
@@ -27,7 +28,6 @@ def find_best_column_name(available_columns, target_keywords, min_score=80):
     return None
 
 # --- 核心功能：数据抓取、解析与信息提取 ---
-
 def scrape_and_normalize_akshare(core_keywords, modifier_keywords, start_date, end_date):
     """
     抓取、模糊匹配列名、标准化并使用精准关键词筛选。
@@ -50,7 +50,6 @@ def scrape_and_normalize_akshare(core_keywords, modifier_keywords, start_date, e
 
     raw_df = pd.concat(all_raw_dfs, ignore_index=True)
 
-    # --- 智能列名映射 ---
     available_cols = raw_df.columns.tolist()
     column_mapping = {
         '股票代码': find_best_column_name(available_cols, ['代码', '股票代码']),
@@ -60,16 +59,13 @@ def scrape_and_normalize_akshare(core_keywords, modifier_keywords, start_date, e
         'PDF链接': find_best_column_name(available_cols, ['链接', '公告链接', 'url']),
     }
 
-    # --- 标准化DataFrame ---
     normalized_df = pd.DataFrame()
     for std_name, found_name in column_mapping.items():
         if found_name:
             normalized_df[std_name] = raw_df[found_name]
         else:
             normalized_df[std_name] = None
-            print(f"  - \033[93m警告\033[0m: 未能在源数据中找到 '{std_name}' 的匹配列。")
-
-    # --- 精准关键词筛选 ---
+    
     if '公告标题' in normalized_df.columns and not normalized_df['公告标题'].isnull().all():
         core_pattern = '|'.join(core_keywords)
         modifier_pattern = '|'.join(modifier_keywords)
@@ -99,14 +95,18 @@ def _do_pdf_extraction(pdf_url, timeout=30):
 
 async def extract_details_from_pdf(pdf_link):
     """
-    【全新AI版本】从PDF文本中智能提取交易的关键信息。
+    【AI版本】从PDF文本中智能提取交易的关键信息。
     """
     text = _do_pdf_extraction(pdf_link)
     if not text:
         return ("信息提取失败", "待解析", "待解析", "待解析", "未能成功解析PDF文件。")
 
-    # 定义AI模型的输入
-    api_key = "" # 在Canvas环境中会自动提供
+    # --- 【核心改进】增加API密钥的诊断检查 ---
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("  - \033[91mFATAL\033[0m: 环境变量 'GEMINI_API_KEY' 未设置。AI解析功能已禁用。")
+        return ("AI配置缺失", "待解析", "待解析", "待解析", "由于缺少API密钥，AI解析功能无法使用。")
+
     api_url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=){api_key}"
     
     system_prompt = """
@@ -119,19 +119,15 @@ async def extract_details_from_pdf(pdf_link):
     如果某项信息在文本中没有明确提及，请返回 "信息未披露"。
     """
     
-    # 构造请求体
     payload = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"parts": [{"text": text[:30000]}]}], # 限制文本长度以符合API要求
+        "contents": [{"parts": [{"text": text[:30000]}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "transaction_type": {"type": "STRING"},
-                    "acquirer": {"type": "STRING"},
-                    "target": {"type": "STRING"},
-                    "transaction_price": {"type": "STRING"},
+                "type": "OBJECT", "properties": {
+                    "transaction_type": {"type": "STRING"}, "acquirer": {"type": "STRING"},
+                    "target": {"type": "STRING"}, "transaction_price": {"type": "STRING"},
                     "summary": {"type": "STRING"}
                 }
             }
@@ -139,40 +135,23 @@ async def extract_details_from_pdf(pdf_link):
     }
     
     try:
-        # 发起异步API请求
-        async with requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}) as response:
-            response.raise_for_status()
-            result = await response.json()
-            
-            # 解析AI返回的JSON
-            content_part = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
-            parsed_json = json.loads(content_part)
+        response = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'})
+        response.raise_for_status()
+        result = response.json()
+        
+        content_part = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
+        parsed_json = json.loads(content_part)
 
-            return (
-                parsed_json.get("transaction_type", "解析失败"),
-                parsed_json.get("acquirer", "解析失败"),
-                parsed_json.get("target", "解析失败"),
-                parsed_json.get("transaction_price", "解析失败"),
-                parsed_json.get("summary", "AI未能生成概要。")
-            )
-
+        return (
+            parsed_json.get("transaction_type", "解析失败"),
+            parsed_json.get("acquirer", "解析失败"),
+            parsed_json.get("target", "解析失败"),
+            parsed_json.get("transaction_price", "解析失败"),
+            parsed_json.get("summary", "AI未能生成概要。")
+        )
     except Exception as e:
         print(f"  ! 调用AI解析时发生错误: {e}")
         return ("AI调用失败", "待解析", "待解析", "待解析", "调用AI解析时发生网络或API错误。")
-
-
-def get_stock_realtime_quote(stock_code):
-    """获取单只股票的实时行情和财务指标。"""
-    if not stock_code or stock_code == 'N/A':
-        return "无效的股票代码。"
-    try:
-        stock_spot_df = ak.stock_zh_a_spot_em()
-        quote = stock_spot_df[stock_spot_df['代码'] == stock_code]
-        if quote.empty:
-            return f"未能找到股票代码 {stock_code} 的实时行情数据。"
-        return quote.iloc[0]
-    except Exception as e:
-        return f"查询实时行情时出错: {e}"
 
 def get_company_profiles(stock_codes):
     """获取公司的基本信息（行业、主营业务），增加了备用数据源。"""
@@ -183,14 +162,12 @@ def get_company_profiles(stock_codes):
             industry = profile_df.loc[profile_df['item'] == '行业', 'value'].iloc[0]
             main_business = profile_df.loc[profile_df['item'] == '主营业务范围', 'value'].iloc[0]
             profiles[code] = {'industry': industry, 'main_business': main_business}
-            print(f"  - [cninfo] 成功获取 {code} 的档案。")
         except Exception:
             try:
                 profile_df_em = ak.stock_individual_info_em(symbol=code)
                 industry = profile_df_em.loc[profile_df_em['item'] == '行业', 'value'].iloc[0]
                 main_business = profile_df_em.loc[profile_df_em['item'] == '主营业务', 'value'].iloc[0]
                 profiles[code] = {'industry': industry, 'main_business': main_business}
-                print(f"  - [East Money] 成功从备用源获取 {code} 的档案。")
             except Exception:
                 profiles[code] = {'industry': '查询失败', 'main_business': '查询失败'}
         time.sleep(0.3)
