@@ -1,4 +1,4 @@
-# app.py (v5.2 - Decoupled Architecture)
+# app.py (v5.4 - Grouped View & Enhanced UX)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -7,14 +7,15 @@ import os
 import sys
 
 # --- 动态路径设置 ---
-# 确保应用在任何环境下都能找到其数据获取模块
 try:
-    # 导入专为前端设计的、轻量级的数据获取模块
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     import frontend_data_fetcher as fdf
     FETCHER_LOADED = True
 except (ImportError, ModuleNotFoundError):
     FETCHER_LOADED = False
+
+# --- 全局常量 ---
+PAGE_SIZE = 200 # 增加每页加载量以适应分组视图
 
 # --- 数据库连接 ---
 @st.cache_resource(ttl=600)
@@ -32,8 +33,33 @@ def init_connection():
 
 conn = init_connection()
 
-# --- 页面配置 ---
+# --- 数据查询逻辑 ---
+def run_query(start, end, keyword):
+    if not conn:
+        st.error("数据库未连接，无法查询。")
+        return pd.DataFrame()
+    try:
+        # 为了分组，一次性获取较多数据
+        query = "SELECT * FROM announcements WHERE announcement_date BETWEEN %s AND %s"
+        params = [start, end]
+        if keyword:
+            query += " AND announcement_title ILIKE %s"
+            params.append(f"%{keyword}%")
+        query += f" ORDER BY announcement_date DESC, company_name ASC, id DESC LIMIT 500" # 最多加载500条以分组
+        return pd.read_sql_query(query, conn, params=params)
+    except Exception as e:
+        st.error(f"查询数据库时出错: {e}")
+        return pd.DataFrame()
+
+# --- 页面配置与状态初始化 ---
 st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", layout="wide")
+
+# 初始化 session state
+if 'df_results' not in st.session_state: st.session_state.df_results = pd.DataFrame()
+if 'selected_announcement_id' not in st.session_state: st.session_state.selected_announcement_id = None
+if 'realtime_quote' not in st.session_state: st.session_state.realtime_quote = {}
+
+# --- 页面标题 ---
 st.title('📈 A股并购事件追踪器 (专业版)')
 st.markdown("数据来源: 由后台Worker每日自动更新")
 
@@ -47,80 +73,52 @@ with st.sidebar:
                 total_records, last_update = cur.fetchone()
                 st.metric("数据库总记录数", f"{total_records or 0} 条")
                 st.metric("数据更新至", last_update.strftime('%Y-%m-%d') if last_update else "无记录")
-        except Exception as e:
-            st.error(f"无法获取数据库状态: {e}")
-    else:
-        st.warning("数据库未连接")
+        except Exception: pass
 
-    if not FETCHER_LOADED:
-        st.warning(
-            """
-            **无法加载数据获取模块。** 实时公司快照刷新功能将不可用。
-            **解决方案**: 请检查应用的依赖项配置 (如 requirements.txt)，确保已包含 akshare 库。
-            """
-        )
+    if not FETCHER_LOADED: st.warning("无法加载数据获取模块。实时快照功能将不可用。")
     
     st.divider()
     st.header("🔍 筛选条件")
     today = date.today()
     default_start_date = today - timedelta(days=90)
-    date_range = st.date_input(
-        "选择公告日期范围",
-        value=(default_start_date, today),
-        format="YYYY-MM-DD",
-        key="date_selector_main"
-    )
+    
+    date_range = st.date_input("选择公告日期范围", value=(default_start_date, today), format="YYYY-MM-DD", key="date_selector_main")
     keyword_input = st.text_input("在标题中搜索关键词 (可选)", help="支持模糊搜索。")
-    submit_button = st.button('🔍 查询数据库')
-
-# --- 数据查询逻辑 ---
-def run_query(start, end, keyword):
-    if not conn:
-        st.error("数据库未连接，无法查询。")
-        return pd.DataFrame()
-    try:
-        query = "SELECT * FROM announcements WHERE announcement_date BETWEEN %s AND %s"
-        params = [start, end]
-        if keyword:
-            query += " AND announcement_title ILIKE %s"
-            params.append(f"%{keyword}%")
-        query += " ORDER BY announcement_date DESC, id DESC"
-        return pd.read_sql_query(query, conn, params=params)
-    except Exception as e:
-        st.error(f"查询数据库时出错: {e}")
-        return pd.DataFrame()
+    
+    if st.button('🔍 查询数据库'):
+        if len(date_range) == 2:
+            with st.spinner("正在查询..."):
+                st.session_state.df_results = run_query(date_range[0], date_range[1], keyword_input)
+                st.session_state.selected_announcement_id = None
+                st.session_state.realtime_quote = {}
+        else:
+            st.error("请选择有效的日期范围。")
 
 # --- 主页面展示 ---
-if 'df_results' not in st.session_state:
-    st.session_state.df_results = pd.DataFrame()
-if 'selected_announcement_id' not in st.session_state:
-    st.session_state.selected_announcement_id = None
-if 'realtime_quote' not in st.session_state:
-    st.session_state.realtime_quote = {}
-
-if submit_button:
-    if len(date_range) == 2:
-        with st.spinner("正在查询..."):
-            st.session_state.df_results = run_query(date_range[0], date_range[1], keyword_input)
-            st.session_state.selected_announcement_id = None
-            st.session_state.realtime_quote = {}
-    else:
-        st.error("请选择有效的日期范围。")
-
 df = st.session_state.df_results
 if not df.empty:
-    st.success(f"查询到 {len(df)} 条结果！点击下方列表查看详情。")
+    st.success(f"查询到 {len(df)} 条结果！")
     
-    st.subheader("公告概览")
-    list_container = st.container(height=300)
+    st.subheader("公告概览 (按公司与日期分组)")
+    list_container = st.container(height=400)
+    
+    # --- 【核心改进】分组展示 ---
+    grouped = df.groupby(['announcement_date', 'company_name'])
+    
     with list_container:
-        for index, row in df.iterrows():
-            if st.button(f"**{row['announcement_date'].strftime('%Y-%m-%d')}** | {row['company_name']} | {row['announcement_title']}", key=f"btn_{row['id']}", use_container_width=True):
-                st.session_state.selected_announcement_id = row['id']
-                st.session_state.realtime_quote.pop(row['id'], None)
-    
+        for (ann_date, company), group in grouped:
+            # 创建一个可折叠的组
+            expander_title = f"**{ann_date.strftime('%Y-%m-%d')}** | {company} ({len(group)}条公告)"
+            with st.expander(expander_title):
+                for _, row in group.iterrows():
+                    # 在折叠组内创建单独的公告按钮
+                    if st.button(f"{row['announcement_title']}", key=f"btn_{row['id']}", use_container_width=True):
+                        st.session_state.selected_announcement_id = row['id']
+                        st.session_state.realtime_quote.pop(row['id'], None)
+
     st.divider()
 
+    # --- 公告详情展示 ---
     if st.session_state.selected_announcement_id is not None:
         selected_row = df[df['id'] == st.session_state.selected_announcement_id].iloc[0]
         
@@ -130,7 +128,12 @@ if not df.empty:
         
         with col1:
             st.info(f"**交易概要 (AI提取)**")
-            st.write(selected_row.get('summary', '暂无概要'))
+            summary = selected_row.get('summary')
+            if summary is None or summary == '未能从PDF中提取有效信息。':
+                st.warning("详细信息正在后台AI解析中，请稍后刷新查看。")
+            else:
+                st.write(summary)
+
             st.markdown(f"""
             - **交易类型**: {selected_row.get('transaction_type', 'N/A')}
             - **收购方**: {selected_row.get('acquirer', 'N/A')}
@@ -139,26 +142,25 @@ if not df.empty:
             """)
 
         with col2:
-            st.info("**上市公司信息 (历史存档)**")
+            st.info("**上市公司信息**")
             st.markdown(f"""
             - **公司名称**: {selected_row['company_name']} ({selected_row['stock_code']})
             - **所属行业**: {selected_row.get('industry', 'N/A')}
             """)
-            st.text_area("主营业务:", value=selected_row.get('main_business', 'N/A'), height=150, disabled=True, key=f"main_biz_{selected_row['id']}")
+            st.text_area("主营业务:", value=selected_row.get('main_business', 'N/A'), height=100, disabled=True, key=f"main_biz_{selected_row['id']}")
 
         st.markdown(f"**[阅读原始公告PDF]({selected_row['pdf_link']})**" if selected_row['pdf_link'] and selected_row['pdf_link'] != 'N/A' else "*无原始公告链接*")
         
         if FETCHER_LOADED:
             if st.button("刷新实时公司快照", key=f"refresh_{selected_row['id']}"):
                 with st.spinner("正在获取实时数据..."):
-                    # 调用新的、轻量级的获取函数
                     quote = fdf.get_stock_realtime_quote(selected_row['stock_code'])
                     st.session_state.realtime_quote[selected_row['id']] = quote
             
             quote_data = st.session_state.realtime_quote.get(selected_row['id'])
-            if quote_data:
+            if quote_data is not None:
                 if isinstance(quote_data, pd.Series):
-                    st.info("**实时财务快照**")
+                    st.success("**实时财务快照**")
                     c1, c2, c3 = st.columns(3)
                     c1.metric("总市值(亿)", f"{quote_data.get('总市值', 0) / 1e8:.2f}")
                     c2.metric("市盈率(动态)", f"{quote_data.get('市盈率-动态', 0):.2f}")
@@ -166,6 +168,5 @@ if not df.empty:
                 else:
                     st.warning(quote_data)
 
-else:
-    if submit_button:
-        st.info("在当前条件下未找到匹配的公告。")
+elif 'df_results' in st.session_state and not st.session_state.df_results.empty:
+    st.info("在当前条件下未找到匹配的公告。")
