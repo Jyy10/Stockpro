@@ -1,4 +1,4 @@
-# backfill_worker.py (v4.1 - Daily Processing)
+# backfill_worker.py (v4.2 - Precise Filtering & Daily Processing)
 import os
 import psycopg2
 import pandas as pd
@@ -31,7 +31,7 @@ def setup_database(conn):
             # 检查并添加新列（如果不存在）
             columns_to_add = {
                 "transaction_type": "VARCHAR(50)", "acquirer": "TEXT",
-                "target": "TEXT", "summary": "TEXT"
+                "target": "TEXT", "summary": "TEXT", "transaction_price": "TEXT"
             }
             for col, col_type in columns_to_add.items():
                 cursor.execute(f"""
@@ -105,7 +105,7 @@ def enrichment_stage(conn):
 
 def main():
     print("="*40)
-    print(f"历史数据回补 Worker (v4.1 - Daily Processing) 开始运行...")
+    print(f"历史数据回补 Worker (v4.2 - Precise Filtering) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
@@ -115,7 +115,10 @@ def main():
         if conn: conn.close()
         return
 
-    keywords = ["重组", "购买资产"]
+    # --- 精准关键词定义 ---
+    core_keywords = ["重组", "购买资产", "资产出售"]
+    modifier_keywords = ["草案", "预案", "进展公告"]
+
     end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=270)
     date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
@@ -126,7 +129,8 @@ def main():
     for single_date in reversed(date_list):
         print(f"\n{'='*20} 正在处理日期: {single_date.strftime('%Y-%m-%d')} {'='*20}")
         
-        daily_df = dh.scrape_akshare(keywords, single_date, single_date)
+        # 使用新的精准筛选函数
+        daily_df = dh.scrape_akshare_precisely(core_keywords, modifier_keywords, single_date, single_date)
 
         if daily_df.empty:
             print("  - 当日未找到相关公告。")
@@ -170,4 +174,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
