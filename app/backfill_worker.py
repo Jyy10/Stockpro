@@ -1,4 +1,4 @@
-# backfill_worker.py (v4.4 - AI Enrichment)
+# backfill_worker.py (v4.5 - Conditional Update)
 import os
 import psycopg2
 import pandas as pd
@@ -105,7 +105,7 @@ async def enrichment_stage(conn):
 
 def main():
     print("="*40)
-    print(f"历史数据回补 Worker (v4.4 - AI) 开始运行...")
+    print(f"历史数据回补 Worker (v4.5) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
@@ -124,6 +124,7 @@ def main():
 
     print("\n--- 阶段1: 开始按天快速录入基础公告 ---")
     total_new_inserts = 0
+    total_updates = 0
     
     for single_date in reversed(date_list):
         print(f"\n{'='*20} 正在处理日期: {single_date.strftime('%Y-%m-%d')} {'='*20}")
@@ -136,6 +137,7 @@ def main():
 
         print(f"  - 找到 {len(daily_df)} 条匹配记录，准备入库...")
         daily_inserts = 0
+        daily_updates = 0
         with conn.cursor() as cursor:
             for _, row in daily_df.iterrows():
                 stock_code = row.get('股票代码')
@@ -144,10 +146,17 @@ def main():
                     continue
                 
                 try:
+                    # --- 【核心改进】智能UPSERT逻辑 ---
                     insert_query = """
                     INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
+                    ON CONFLICT (announcement_date, announcement_title)
+                    DO UPDATE SET
+                        stock_code = EXCLUDED.stock_code,
+                        company_name = EXCLUDED.company_name,
+                        pdf_link = EXCLUDED.pdf_link
+                    WHERE
+                        announcements.stock_code IS NULL OR announcements.stock_code = 'N/A';
                     """
                     record = (
                         row.get('公告日期'), stock_code,
@@ -155,18 +164,20 @@ def main():
                         row.get('PDF链接', 'N/A')
                     )
                     cursor.execute(insert_query, record)
+                    # cursor.rowcount: 1 for INSERT, 2 for UPDATE (in some drivers), 0 for DO NOTHING
                     if cursor.rowcount > 0:
-                        daily_inserts += 1
+                        # 这是一个简化的判断，实际可能是新增或更新
+                        daily_inserts += 1 # 统一计为处理成功
                 except Exception as e:
-                    print(f"    ! 插入时出错: {e}")
+                    print(f"    ! 插入/更新时出错: {e}")
                     conn.rollback()
         
         conn.commit()
-        print(f"  - 当日新入库 {daily_inserts} 条记录。")
+        print(f"  - 当日处理完成 {daily_inserts} 条记录（新增或更新）。")
         total_new_inserts += daily_inserts
         time.sleep(1)
 
-    print(f"\n阶段1完成：总共新录入了 {total_new_inserts} 条基础公告。")
+    print(f"\n阶段1完成：总共处理了 {total_new_inserts} 条基础公告。")
 
     # 运行异步的增补阶段
     asyncio.run(enrichment_stage(conn))
