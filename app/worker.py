@@ -1,4 +1,4 @@
-# worker.py (v4.7 - Final DB Fix)
+# worker.py (v4.8 - Final)
 import os
 import psycopg2
 import pandas as pd
@@ -28,6 +28,7 @@ def setup_database(conn):
     print("--- 正在检查并修复数据库表结构... ---")
     try:
         with conn.cursor() as cursor:
+            # 检查并添加新列
             columns_to_add = {
                 "transaction_type": "VARCHAR(50)", "acquirer": "TEXT",
                 "target": "TEXT", "summary": "TEXT", "transaction_price": "TEXT"
@@ -42,16 +43,14 @@ def setup_database(conn):
                     END IF;
                 END $$;
                 """)
-
+            
+            # 修复约束
             cursor.execute("ALTER TABLE announcements ALTER COLUMN pdf_link DROP NOT NULL;")
-            print(" - 已确保 pdf_link 字段允许为空。")
-
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;")
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS unique_announcement_date_title;")
             cursor.execute("ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title UNIQUE (announcement_date, announcement_title);")
-            
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_announcement_date ON announcements (announcement_date);")
-        
+
         conn.commit()
         print("数据库表结构已准备就绪。")
         return True
@@ -61,7 +60,7 @@ def setup_database(conn):
         return True
 
 async def enrichment_stage(conn):
-    """第二阶段：智能增补（异步）"""
+    """第二阶段：智能增补"""
     print("\n--- 阶段2: 开始智能增补公告详情 ---")
     try:
         with conn.cursor() as cursor:
@@ -98,7 +97,7 @@ async def enrichment_stage(conn):
 
 def main():
     print("="*40)
-    print(f"每日更新 Worker (v4.7) 开始运行...")
+    print(f"每日更新 Worker (v4.8) 开始运行...")
     print(f"正在使用 akshare 版本: {ak.__version__}")
     print("="*40)
 
@@ -115,7 +114,6 @@ def main():
     date_list = [start_date, end_date]
 
     print("\n--- 阶段1: 开始按天快速录入基础公告 ---")
-    total_new_inserts = 0
     
     for single_date in reversed(date_list):
         print(f"\n{'='*20} 正在处理日期: {single_date.strftime('%Y-%m-%d')} {'='*20}")
@@ -125,12 +123,10 @@ def main():
             print("  - 当日未找到相关公告。")
             continue
 
-        daily_inserts = 0
         with conn.cursor() as cursor:
             for _, row in daily_df.iterrows():
                 stock_code = row.get('股票代码')
-                if not stock_code or stock_code == 'N/A' or not isinstance(stock_code, str) or not stock_code.isdigit():
-                    print(f"    - \033[93m跳过\033[0m: 无效或缺失股票代码。标题: {row.get('公告标题')[:30]}...")
+                if not stock_code or not isinstance(stock_code, str) or not stock_code.isdigit():
                     continue
                 
                 try:
@@ -145,24 +141,15 @@ def main():
                     WHERE
                         announcements.stock_code IS NULL OR announcements.stock_code = 'N/A';
                     """
-                    record = (
-                        row.get('公告日期'), stock_code,
-                        row.get('公司名称', 'N/A'), row.get('公告标题'),
-                        row.get('PDF链接')
-                    )
+                    record = (row.get('公告日期'), stock_code, row.get('公司名称', 'N/A'), row.get('公告标题'), row.get('PDF链接'))
                     cursor.execute(insert_query, record)
-                    if cursor.rowcount > 0:
-                        daily_inserts += 1
                 except Exception as e:
                     print(f"    ! 插入/更新时出错: {e}")
                     conn.rollback()
         
         conn.commit()
-        print(f"  - 当日处理完成 {daily_inserts} 条记录（新增或更新）。")
-        total_new_inserts += daily_inserts
-        time.sleep(1)
 
-    print(f"\n阶段1完成：总共处理了 {total_new_inserts} 条基础公告。")
+    print("\n阶段1完成：基础公告录入完毕。")
 
     asyncio.run(enrichment_stage(conn))
 
