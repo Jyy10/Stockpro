@@ -1,14 +1,15 @@
-# backfill_worker.py (v3.8 - Intelligent Enrichment)
+# backfill_worker.py (v4.0 - Intelligent Enrichment)
 import os
 import psycopg2
-import psycopg2.errors
 import pandas as pd
 from datetime import date, timedelta
 import time
 import akshare as ak
+# 确保 data_handler.py 在同一目录下或在Python路径中
 import data_handler as dh
 
 def connect_db():
+    """连接到数据库"""
     print("--- 正在尝试连接数据库... ---")
     try:
         conn = psycopg2.connect(
@@ -23,138 +24,148 @@ def connect_db():
         return None
 
 def setup_database(conn):
-    """确保数据库表结构正确, 并增加新字段"""
-    print("--- 正在检查并升级数据表结构... ---")
+    """确保数据库表结构正确，包含所有需要的字段和约束"""
+    print("--- 正在检查并修复数据库表结构... ---")
     try:
         with conn.cursor() as cursor:
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS announcements (
-                id SERIAL PRIMARY KEY, announcement_date DATE NOT NULL, stock_code VARCHAR(10),
-                company_name VARCHAR(255), announcement_title TEXT NOT NULL, pdf_link TEXT,
-                industry TEXT, main_business TEXT, transaction_type VARCHAR(255),
-                acquirer TEXT, target TEXT, transaction_price TEXT, summary TEXT
-            );""")
-            
-            new_columns = {
-                "transaction_type": "VARCHAR(255)", "acquirer": "TEXT",
+            # 检查并添加新列（如果不存在）
+            columns_to_add = {
+                "transaction_type": "VARCHAR(50)", "acquirer": "TEXT",
                 "target": "TEXT", "summary": "TEXT"
             }
-            for col, col_type in new_columns.items():
-                try:
-                    cursor.execute(f"ALTER TABLE announcements ADD COLUMN {col} {col_type};")
-                except psycopg2.errors.DuplicateColumn:
-                    pass
-
+            for col, col_type in columns_to_add.items():
+                cursor.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_name='announcements' AND column_name='{col}') THEN
+                        ALTER TABLE announcements ADD COLUMN {col} {col_type};
+                    END IF;
+                END $$;
+                """)
+            
+            # 移除可能存在的、有问题的旧约束
             cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS announcements_pdf_link_key;")
-            try:
-                cursor.execute("""
-                ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title
-                UNIQUE (announcement_date, announcement_title);""")
-            except (psycopg2.errors.DuplicateObject, psycopg2.errors.DuplicateTable):
-                conn.rollback()
+            print(" - 已移除陈旧的 pdf_link 约束 (如果存在)。")
+
+            # 添加或确认正确的唯一性约束
+            # 首先移除旧的，以防万一名称不匹配但逻辑相同
+            cursor.execute("ALTER TABLE announcements DROP CONSTRAINT IF EXISTS unique_announcement_date_title;")
+            cursor.execute("ALTER TABLE announcements ADD CONSTRAINT unique_announcement_date_title UNIQUE (announcement_date, announcement_title);")
+            print(" - 已确保正确的唯一性约束 (date, title) 已设置。")
+        
         conn.commit()
-        print("数据表 'announcements' 已准备就绪。")
+        print("数据库表结构已准备就绪。")
+        return True
+    except psycopg2.errors.DuplicateObject:
+        print(" - 唯一性约束已存在，无需重复添加。")
+        conn.rollback() # 回滚ADD CONSTRAINT事务
         return True
     except Exception as e:
         print(f"数据库设置失败: {e}")
         conn.rollback()
         return False
 
-def fast_forward_stage(conn):
-    """阶段一：快速抓取并录入所有匹配公告的基本信息"""
-    print("\n" + "="*20 + " 阶段一：快速录入基本信息 " + "="*20)
-    end_date = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=270)
-    keywords = ["重组", "购买资产", "要约收购"]
+def initial_ingestion_stage(conn, keywords, start_date, end_date):
+    """第一阶段：快速抓取并录入基础公告信息"""
+    print("\n--- 阶段1: 开始快速录入基础公告 ---")
+    all_announcements_df = dh.scrape_akshare(keywords, start_date, end_date)
     
-    date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
-    total_days = len(date_list)
-    total_new_inserts = 0
-
-    for i, single_date in enumerate(reversed(date_list)):
-        print(f"\n--- 正在处理日期: {single_date} ({i+1}/{total_days}) ---")
-        daily_df = dh.scrape_akshare(keywords, single_date, single_date)
-
-        if daily_df.empty: continue
-
-        inserts_today = 0
-        with conn.cursor() as cursor:
-            for _, row in daily_df.iterrows():
-                try:
-                    cursor.execute("""
-                    INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
-                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
-                    """, (row.get('公告日期'), row.get('股票代码', 'N/A'), row.get('公司名称', 'N/A'),
-                          row.get('公告标题'), row.get('PDF链接', 'N/A')))
-                    if cursor.rowcount > 0: inserts_today += 1
-                except Exception:
-                    conn.rollback()
-        
-        if inserts_today > 0:
-            conn.commit()
-            total_new_inserts += inserts_today
-    
-    print(f"\n--- 阶段一完成：共新录入 {total_new_inserts} 条公告基本信息 ---")
-
-def enrichment_stage(conn):
-    """阶段二：慢速增补，调用智能解析器并更新数据库"""
-    print("\n" + "="*20 + " 阶段二：智能增补交易详情 " + "="*20)
-    
-    records_to_process = []
-    with conn.cursor() as cursor:
-        cursor.execute("""
-        SELECT id, pdf_link, company_name, announcement_title, stock_code FROM announcements 
-        WHERE pdf_link IS NOT NULL AND pdf_link != 'N/A' AND summary IS NULL
-        ORDER BY announcement_date DESC;
-        """)
-        records_to_process = cursor.fetchall()
-
-    if not records_to_process:
-        print("--- 无需增补的数据，或所有数据均已增补完毕。---")
+    if all_announcements_df.empty:
+        print("阶段1完成：未找到新的相关公告可供录入。")
         return
 
-    print(f"--- 发现 {len(records_to_process)} 条记录需要进行智能解析 ---")
-    updated_count = 0
-    
-    for i, (record_id, pdf_link, announcer_name, announcement_title, stock_code) in enumerate(records_to_process):
-        try:
-            pdf_details = dh.extract_details_from_pdf(pdf_link, announcer_name, announcement_title)
-            profiles = dh.get_company_profiles([stock_code])
-            profile = profiles.get(stock_code, {})
+    print(f"准备将 {len(all_announcements_df)} 条匹配记录写入数据库...")
+    with conn.cursor() as cursor:
+        for _, row in all_announcements_df.iterrows():
+            try:
+                insert_query = """
+                INSERT INTO announcements (announcement_date, stock_code, company_name, announcement_title, pdf_link)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (announcement_date, announcement_title) DO NOTHING;
+                """
+                record = (
+                    row.get('公告日期'), row.get('股票代码', 'N/A'),
+                    row.get('公司名称', 'N/A'), row.get('公告标题'),
+                    row.get('PDF链接', 'N/A')
+                )
+                cursor.execute(insert_query, record)
+            except Exception as e:
+                print(f"  ! 插入基础信息时出错: {e}")
+                conn.rollback()
+    conn.commit()
+    print("阶段1完成：基础信息录入完毕。")
 
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                UPDATE announcements SET 
-                    transaction_type = %s, acquirer = %s, target = %s,
-                    transaction_price = %s, summary = %s, industry = %s, main_business = %s
+def enrichment_stage(conn):
+    """第二阶段：对数据库中缺少详细信息的公告进行智能增补"""
+    print("\n--- 阶段2: 开始智能增补公告详情 ---")
+    try:
+        with conn.cursor() as cursor:
+            # 选取需要增补的记录：summary 字段为空或为特定的初始值
+            cursor.execute("SELECT id, pdf_link FROM announcements WHERE summary IS NULL OR summary = '未能从PDF中提取有效信息。' LIMIT 100;") # 每次处理100条
+            records_to_enrich = cursor.fetchall()
+
+            if not records_to_enrich:
+                print("阶段2完成：没有需要增补信息的公告。")
+                return
+            
+            print(f"找到 {len(records_to_enrich)} 条公告需要增补详细信息...")
+            
+            for record_id, pdf_link in records_to_enrich:
+                if not pdf_link or pdf_link == 'N/A':
+                    # 对于没有PDF链接的，直接更新状态
+                    update_query = "UPDATE announcements SET summary = %s WHERE id = %s;"
+                    cursor.execute(update_query, ("无PDF链接，无法解析。", record_id))
+                    continue
+
+                print(f"  - 正在解析公告 ID: {record_id}...")
+                # 调用智能解析器
+                trans_type, acquirer, target, price, summary = dh.extract_details_from_pdf(pdf_link)
+                
+                # 更新回数据库
+                update_query = """
+                UPDATE announcements 
+                SET transaction_type = %s, acquirer = %s, target = %s, transaction_price = %s, summary = %s
                 WHERE id = %s;
-                """, (pdf_details['transaction_type'], pdf_details['acquirer'],
-                      pdf_details['target'], pdf_details['transaction_price'],
-                      pdf_details['summary'], profile.get('industry'), 
-                      profile.get('main_business'), record_id))
-            conn.commit()
-            updated_count += 1
-            time.sleep(1)
+                """
+                cursor.execute(update_query, (trans_type, acquirer, target, price, summary, record_id))
+                time.sleep(1) # 尊重PDF源，避免请求过快
+        
+        conn.commit()
+        print(f"阶段2完成：成功增补了 {len(records_to_enrich)} 条公告的信息。")
 
-        except Exception as e:
-            print(f"  ! 处理记录 {record_id} 时发生错误: {e}")
-            conn.rollback()
-
-    print(f"\n--- 阶段二完成：成功增补了 {updated_count} 条记录的详细信息 ---")
+    except Exception as e:
+        print(f"  ! 在增补阶段发生严重错误: {e}")
+        conn.rollback()
 
 def main():
-    print("="*40 + "\n历史数据回补 Worker (两阶段模式) 开始运行...\n" + "="*40)
+    print("="*40)
+    print(f"历史数据回补 Worker (v4.0) 开始运行...")
+    print(f"正在使用 akshare 版本: {ak.__version__}")
+    print("="*40)
+
     conn = connect_db()
     if not conn or not setup_database(conn):
+        print("因数据库准备失败，Worker 提前终止。")
         if conn: conn.close()
         return
 
-    try:
-        fast_forward_stage(conn)
-        enrichment_stage(conn)
-    finally:
-        conn.close()
-        print("\n" + "="*40 + "\n历史数据回补 Worker 运行完毕。\n" + "="*40)
+    # 定义核心关键词
+    keywords = ["重组", "购买资产"] # 精简后的关键词
+    
+    # 定义回补时间范围
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=270)
+
+    # 执行两个核心阶段
+    initial_ingestion_stage(conn, keywords, start_date, end_date)
+    enrichment_stage(conn)
+
+    conn.close()
+    print("\n" + "="*40)
+    print("历史数据回补 Worker 运行完毕。")
+    print("="*40)
 
 if __name__ == "__main__":
     main()
+
