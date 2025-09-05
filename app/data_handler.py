@@ -1,4 +1,4 @@
-# data_handler.py (v4.2 - Robust Parsing)
+# data_handler.py (v4.3 - Real-time Quote)
 import requests
 import pandas as pd
 import akshare as ak
@@ -117,6 +117,22 @@ def extract_details_from_pdf(pdf_link):
         summary += f" 涉及的交易对价约为 {price}。"
 
     return transaction_type, acquirer, target, price, summary
+
+def get_stock_realtime_quote(stock_code):
+    """
+    【新增】获取单只股票的实时行情和财务指标。
+    """
+    if not stock_code or stock_code == 'N/A':
+        return "无效的股票代码。"
+    try:
+        # 使用东方财富的实时行情接口，数据较全
+        stock_spot_df = ak.stock_zh_a_spot_em()
+        quote = stock_spot_df[stock_spot_df['代码'] == stock_code]
+        if quote.empty:
+            return f"未能找到股票代码 {stock_code} 的实时行情数据。"
+        return quote.iloc[0]
+    except Exception as e:
+        return f"查询实时行情时出错: {e}"
 
 def get_company_profiles(stock_codes):
     """
