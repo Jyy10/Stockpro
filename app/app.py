@@ -1,21 +1,11 @@
-# app.py (v5.4 - Grouped View & Enhanced UX)
+# app.py (v5.5 - Merged Fetcher)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
 import psycopg2
 import os
 import sys
-
-# --- 动态路径设置 ---
-try:
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    import frontend_data_fetcher as fdf
-    FETCHER_LOADED = True
-except (ImportError, ModuleNotFoundError):
-    FETCHER_LOADED = False
-
-# --- 全局常量 ---
-PAGE_SIZE = 200 # 增加每页加载量以适应分组视图
+import akshare as ak
 
 # --- 数据库连接 ---
 @st.cache_resource(ttl=600)
@@ -33,19 +23,34 @@ def init_connection():
 
 conn = init_connection()
 
-# --- 数据查询逻辑 ---
+# --- 数据获取与查询逻辑 ---
+
+def get_stock_realtime_quote(stock_code):
+    """
+    获取单只股票的实时行情和财务指标。
+    """
+    if not stock_code or stock_code == 'N/A':
+        return "无效的股票代码。"
+    try:
+        stock_spot_df = ak.stock_zh_a_spot_em()
+        quote = stock_spot_df[stock_spot_df['代码'] == stock_code]
+        if quote.empty:
+            return f"未能找到股票代码 {stock_code} 的实时行情数据。"
+        return quote.iloc[0]
+    except Exception as e:
+        return f"查询实时行情时出错: {e}"
+
 def run_query(start, end, keyword):
     if not conn:
         st.error("数据库未连接，无法查询。")
         return pd.DataFrame()
     try:
-        # 为了分组，一次性获取较多数据
         query = "SELECT * FROM announcements WHERE announcement_date BETWEEN %s AND %s"
         params = [start, end]
         if keyword:
             query += " AND announcement_title ILIKE %s"
             params.append(f"%{keyword}%")
-        query += f" ORDER BY announcement_date DESC, company_name ASC, id DESC LIMIT 500" # 最多加载500条以分组
+        query += f" ORDER BY announcement_date DESC, company_name ASC, id DESC LIMIT 500"
         return pd.read_sql_query(query, conn, params=params)
     except Exception as e:
         st.error(f"查询数据库时出错: {e}")
@@ -54,7 +59,6 @@ def run_query(start, end, keyword):
 # --- 页面配置与状态初始化 ---
 st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", layout="wide")
 
-# 初始化 session state
 if 'df_results' not in st.session_state: st.session_state.df_results = pd.DataFrame()
 if 'selected_announcement_id' not in st.session_state: st.session_state.selected_announcement_id = None
 if 'realtime_quote' not in st.session_state: st.session_state.realtime_quote = {}
@@ -74,8 +78,6 @@ with st.sidebar:
                 st.metric("数据库总记录数", f"{total_records or 0} 条")
                 st.metric("数据更新至", last_update.strftime('%Y-%m-%d') if last_update else "无记录")
         except Exception: pass
-
-    if not FETCHER_LOADED: st.warning("无法加载数据获取模块。实时快照功能将不可用。")
     
     st.divider()
     st.header("🔍 筛选条件")
@@ -102,16 +104,13 @@ if not df.empty:
     st.subheader("公告概览 (按公司与日期分组)")
     list_container = st.container(height=400)
     
-    # --- 【核心改进】分组展示 ---
     grouped = df.groupby(['announcement_date', 'company_name'])
     
     with list_container:
         for (ann_date, company), group in grouped:
-            # 创建一个可折叠的组
             expander_title = f"**{ann_date.strftime('%Y-%m-%d')}** | {company} ({len(group)}条公告)"
             with st.expander(expander_title):
                 for _, row in group.iterrows():
-                    # 在折叠组内创建单独的公告按钮
                     if st.button(f"{row['announcement_title']}", key=f"btn_{row['id']}", use_container_width=True):
                         st.session_state.selected_announcement_id = row['id']
                         st.session_state.realtime_quote.pop(row['id'], None)
@@ -151,22 +150,21 @@ if not df.empty:
 
         st.markdown(f"**[阅读原始公告PDF]({selected_row['pdf_link']})**" if selected_row['pdf_link'] and selected_row['pdf_link'] != 'N/A' else "*无原始公告链接*")
         
-        if FETCHER_LOADED:
-            if st.button("刷新实时公司快照", key=f"refresh_{selected_row['id']}"):
-                with st.spinner("正在获取实时数据..."):
-                    quote = fdf.get_stock_realtime_quote(selected_row['stock_code'])
-                    st.session_state.realtime_quote[selected_row['id']] = quote
-            
-            quote_data = st.session_state.realtime_quote.get(selected_row['id'])
-            if quote_data is not None:
-                if isinstance(quote_data, pd.Series):
-                    st.success("**实时财务快照**")
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("总市值(亿)", f"{quote_data.get('总市值', 0) / 1e8:.2f}")
-                    c2.metric("市盈率(动态)", f"{quote_data.get('市盈率-动态', 0):.2f}")
-                    c3.metric("市净率", f"{quote_data.get('市净率', 0):.2f}")
-                else:
-                    st.warning(quote_data)
+        if st.button("刷新实时公司快照", key=f"refresh_{selected_row['id']}"):
+            with st.spinner("正在获取实时数据..."):
+                quote = get_stock_realtime_quote(selected_row['stock_code'])
+                st.session_state.realtime_quote[selected_row['id']] = quote
+        
+        quote_data = st.session_state.realtime_quote.get(selected_row['id'])
+        if quote_data is not None:
+            if isinstance(quote_data, pd.Series):
+                st.success("**实时财务快照**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("总市值(亿)", f"{quote_data.get('总市值', 0) / 1e8:.2f}")
+                c2.metric("市盈率(动态)", f"{quote_data.get('市盈率-动态', 0):.2f}")
+                c3.metric("市净率", f"{quote_data.get('市净率', 0):.2f}")
+            else:
+                st.warning(quote_data)
 
 elif 'df_results' in st.session_state and not st.session_state.df_results.empty:
     st.info("在当前条件下未找到匹配的公告。")
