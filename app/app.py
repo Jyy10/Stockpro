@@ -1,4 +1,4 @@
-# app.py (v4.1 - Fix & Enhanced UI)
+# app.py (v4.2 - Final Fix)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -6,22 +6,28 @@ import psycopg2
 import sys, os
 
 # --- 动态路径配置，确保能找到 data_handler ---
-def setup_path():
+def setup_path(sidebar_ref):
+    """
+    动态配置模块路径，并在指定的 sidebar 引用上显示警告。
+    """
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(current_dir))
+    # 假设 app.py 在 stockpro/app/ 目录下, 项目根目录是 stockpro
+    project_root = os.path.dirname(current_dir) 
     if project_root not in sys.path:
         sys.path.append(project_root)
     
     try:
+        # 现在应该能从 app.data_handler 找到
         from app import data_handler as dh
         return dh
     except (ImportError, ModuleNotFoundError):
-        st.sidebar.warning("""
+        sidebar_ref.warning("""
         **警告**: 无法加载后台数据模块 (data_handler)。
         实时公司快照刷新功能将不可用。
+        
+        **解决方案**: 请检查应用的依赖项配置 (如 requirements.txt)，确保已包含 PyPDF2 和 akshare 库。
         """)
         return None
-dh = setup_path()
 
 # --- 页面配置 & 数据库连接 ---
 st.set_page_config(page_title="A股并购事件追踪器", page_icon="📈", layout="wide")
@@ -43,10 +49,13 @@ conn = init_connection()
 
 # --- 侧边栏 ---
 with st.sidebar:
+    # 【修复】将模块加载和警告统一放在 sidebar 的上下文中
+    dh = setup_path(st.sidebar)
+
     st.header("🔍 筛选条件")
     today = date.today()
     default_start_date = today - timedelta(days=90)
-    # 【修复】为 date_input 添加唯一的 key，防止 StreamlitDuplicateElementId 错误
+    
     date_range = st.date_input(
         "选择公告日期范围", 
         value=(default_start_date, today), 
@@ -108,7 +117,6 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
     df = st.session_state.announcement_list
     st.success(f"为您找到 {len(df)} 条相关结果！")
     
-    # 【新增】首先展示一个清晰的概览表格
     st.subheader("公告概览")
     summary_df = df[['announcement_date', 'company_name', 'announcement_title']].rename(columns={
         'announcement_date': '公告日期',
@@ -120,10 +128,8 @@ if 'announcement_list' in st.session_state and not st.session_state.announcement
     st.markdown("---")
     st.subheader("公告详情")
 
-    # 【优化】然后以卡片形式展示每一条的详细信息
     for index, row in df.iterrows():
         with st.container(border=True):
-            # 将标题和日期置于顶部
             st.markdown(f"##### {row.get('announcement_title')}")
             st.caption(f"公司: {row.get('company_name', 'N/A')} ({row.get('stock_code', 'N/A')}) | 日期: {row['announcement_date'].strftime('%Y-%m-%d')}")
             
