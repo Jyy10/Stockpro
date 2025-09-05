@@ -1,4 +1,4 @@
-# app.py (v5.6 - Nested Grouping)
+# app.py (v5.7 - Datetime Fix)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -108,9 +108,11 @@ if not df.empty:
     st.subheader("公告概览 (按日期 -> 公司分组)")
     list_container = st.container(height=400)
     
-    # --- 【核心改进】嵌套分组展示 ---
+    # --- 【核心修复】确保日期列是 datetime 类型 ---
+    df['announcement_date'] = pd.to_datetime(df['announcement_date'], errors='coerce')
+    df.dropna(subset=['announcement_date'], inplace=True)
+
     # 先按日期分组
-    # 注意：直接对 timestamp 进行 groupby 可能因为时区问题出错，先转为 date
     df['ann_date_only'] = df['announcement_date'].dt.date
     grouped_by_date = df.sort_values('ann_date_only', ascending=False).groupby('ann_date_only', sort=False)
 
