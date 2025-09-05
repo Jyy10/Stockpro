@@ -1,4 +1,4 @@
-# backfill_worker.py (v3.5 - Final DB Fix)
+# backfill_worker.py (v3.6 - Final DB Fix)
 import os
 import psycopg2
 import psycopg2.errors
@@ -63,7 +63,8 @@ def setup_database(conn):
             try:
                 cursor.execute(add_correct_constraint_query)
                 print("成功为数据表应用正确的 UNIQUE 约束。")
-            except psycopg2.errors.DuplicateObject:
+            except (psycopg2.errors.DuplicateObject, psycopg2.errors.DuplicateTable):
+                # (关键修复) 捕获更广泛的“已存在”错误，包括 "relation already exists"
                 # 这个错误意味着约束已经存在，是正常情况
                 print("正确的 UNIQUE 约束已存在，无需更改。")
                 conn.rollback() # 回滚失败的 ALTER TABLE 事务
