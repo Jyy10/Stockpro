@@ -1,4 +1,4 @@
-# data_handler.py (v5.2 - AI Diagnostics)
+# data_handler.py (v5.4 - Optimized Maps)
 import requests
 import pandas as pd
 import akshare as ak
@@ -13,9 +13,7 @@ from thefuzz import process as fuzz_process
 
 # --- 辅助函数 ---
 def find_best_column_name(available_columns, target_keywords, min_score=80):
-    """
-    在一组可用的列名中，为一组目标关键词找到最佳匹配的列名。
-    """
+    """在一组可用的列名中，为一组目标关键词找到最佳匹配的列名。"""
     best_match = None
     highest_score = 0
     for keyword in target_keywords:
@@ -28,10 +26,26 @@ def find_best_column_name(available_columns, target_keywords, min_score=80):
     return None
 
 # --- 核心功能：数据抓取、解析与信息提取 ---
+
+def get_master_stock_maps():
+    """
+    【全新】获取一份完整的A股股票列表，作为代码和名称的权威来源。
+    返回两个字典: (code_to_name, name_to_code)
+    """
+    try:
+        stock_df = ak.stock_zh_a_spot_em()
+        stock_df = stock_df[stock_df['代码'].str.match(r'^(0|3|6)')]
+        stock_df = stock_df[['代码', '名称']].dropna()
+        
+        code_to_name = pd.Series(stock_df['名称'].values, index=stock_df['代码']).to_dict()
+        name_to_code = pd.Series(stock_df['代码'].values, index=stock_df['名称']).to_dict()
+        return code_to_name, name_to_code
+    except Exception as e:
+        print(f"\033[91m错误\033[0m: 获取主数据列表失败: {e}")
+        return None, None
+
 def scrape_and_normalize_akshare(core_keywords, modifier_keywords, start_date, end_date):
-    """
-    抓取、模糊匹配列名、标准化并使用精准关键词筛选。
-    """
+    """抓取、模糊匹配列名、标准化并使用精准关键词筛选。"""
     all_raw_dfs = []
     date_list = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
     
@@ -61,10 +75,10 @@ def scrape_and_normalize_akshare(core_keywords, modifier_keywords, start_date, e
 
     normalized_df = pd.DataFrame()
     for std_name, found_name in column_mapping.items():
-        if found_name:
+        if found_name and found_name in raw_df.columns:
             normalized_df[std_name] = raw_df[found_name]
         else:
-            normalized_df[std_name] = None
+            normalized_df[std_name] = 'N/A' # 保证列存在
     
     if '公告标题' in normalized_df.columns and not normalized_df['公告标题'].isnull().all():
         core_pattern = '|'.join(core_keywords)
@@ -94,14 +108,11 @@ def _do_pdf_extraction(pdf_url, timeout=30):
         return ""
 
 async def extract_details_from_pdf(pdf_link):
-    """
-    【AI版本】从PDF文本中智能提取交易的关键信息。
-    """
+    """【AI版本】从PDF文本中智能提取交易的关键信息。"""
     text = _do_pdf_extraction(pdf_link)
     if not text:
         return ("信息提取失败", "待解析", "待解析", "待解析", "未能成功解析PDF文件。")
 
-    # --- 【核心改进】增加API密钥的诊断检查 ---
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         print("  - \033[91mFATAL\033[0m: 环境变量 'GEMINI_API_KEY' 未设置。AI解析功能已禁用。")
@@ -119,28 +130,19 @@ async def extract_details_from_pdf(pdf_link):
     如果某项信息在文本中没有明确提及，请返回 "信息未披露"。
     """
     
-    payload = {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"parts": [{"text": text[:30000]}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT", "properties": {
-                    "transaction_type": {"type": "STRING"}, "acquirer": {"type": "STRING"},
-                    "target": {"type": "STRING"}, "transaction_price": {"type": "STRING"},
-                    "summary": {"type": "STRING"}
-                }
-            }
-        }
-    }
+    payload = { "contents": [{"parts": [{"text": f"{system_prompt}\n\n公告文本如下:\n{text[:20000]}"}]}]}
     
     try:
         response = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'})
         response.raise_for_status()
         result = response.json()
         
-        content_part = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
-        parsed_json = json.loads(content_part)
+        content_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
+        
+        if content_text.strip().startswith("```json"):
+            content_text = content_text.strip()[7:-3]
+        
+        parsed_json = json.loads(content_text)
 
         return (
             parsed_json.get("transaction_type", "解析失败"),
